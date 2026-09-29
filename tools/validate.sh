@@ -24,6 +24,11 @@ run_static_checks() {
     "${actionlint_bin}" -color .github/workflows/*.yml
 
     test_dir="$(mktemp -d /tmp/ai-passport-host-tests.XXXXXX)"
+    # Section-GC link flag: Apple ld uses -dead_strip; GNU ld uses --gc-sections.
+    case "$(uname -s)" in
+        Darwin) gc_sections="-Wl,-dead_strip" ;;
+        *)      gc_sections="-Wl,--gc-sections" ;;
+    esac
     "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
         tests/test_ui_pixel_math.c main/ui_pixel_math.c \
         -o "${test_dir}/test_ui_pixel_math"
@@ -57,10 +62,31 @@ run_static_checks() {
     for demo in audio low_power ble wifi; do
         "${CC:-cc}" -std=c11 -Wall -Wextra -Werror \
             -ffunction-sections -fdata-sections -Itests/demo_stubs -Imain \
-            "tests/test_demo_${demo}_runtime.c" -Wl,--gc-sections \
+            "tests/test_demo_${demo}_runtime.c" "${gc_sections}" \
             -o "${test_dir}/test_demo_${demo}_runtime"
         "${test_dir}/test_demo_${demo}_runtime"
     done
+    for pibud in state text_layout line i4; do
+        "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
+            "tests/test_pibud_${pibud}.c" "main/pibud_${pibud}.c" \
+            -o "${test_dir}/test_pibud_${pibud}"
+        "${test_dir}/test_pibud_${pibud}"
+    done
+    # Protocol test links cJSON from an available ESP-IDF; skip when absent.
+    cjson_src=""
+    if [ -n "${IDF_PATH:-}" ] && [ -f "${IDF_PATH}/components/json/cJSON/cJSON.c" ]; then
+        cjson_src="${IDF_PATH}/components/json/cJSON/cJSON.c"
+    elif [ -f "${HOME}/esp/esp-idf-v5.5.3/components/json/cJSON/cJSON.c" ]; then
+        cjson_src="${HOME}/esp/esp-idf-v5.5.3/components/json/cJSON/cJSON.c"
+    fi
+    if [ -n "${cjson_src}" ]; then
+        "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain -I"$(dirname "${cjson_src}")" \
+            tests/test_pibud_protocol.c main/pibud_protocol.c "${cjson_src}" \
+            -o "${test_dir}/test_pibud_protocol"
+        "${test_dir}/test_pibud_protocol"
+    else
+        echo "Host test test_pibud_protocol: SKIPPED (cJSON/ESP-IDF not available)"
+    fi
     PYTHONDONTWRITEBYTECODE=1 python3 tests/test_deep_sleep_contract.py
     PYTHONDONTWRITEBYTECODE=1 python3 tests/test_check_repo.py
     PYTHONDONTWRITEBYTECODE=1 python3 tests/test_verify_firmware.py
