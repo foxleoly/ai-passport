@@ -1,0 +1,5 @@
+# Compiled sidecar binary
+/pibuddysidecar
+# ad-hoc TCC / CoreBluetooth app-bundle scaffolding (generated, not part of build)
+pi-buddy-sidecar.app/
+bletest.app/
