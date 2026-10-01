@@ -10,8 +10,10 @@ package main
 
 import (
 	"fmt"
+	"hash/fnv"
 	"net"
 	"net/http"
+	"os"
 	"os/exec"
 	"strconv"
 	"time"
@@ -27,6 +29,25 @@ const (
 	wsMdnsService = "_pibuddy"
 	wsMdnsRegType = wsMdnsService + "._tcp"
 )
+
+// mdnsInstance names this registration. 'dns-sd' instance names are unique per
+// link, so a fixed name makes a second sidecar compete for it and lets the device
+// bind to whichever one answers. Port plus a hostname hash stays stable across
+// restarts while being distinct per machine; the device browses by service type,
+// so the instance name is free to vary.
+func mdnsInstance(port string) string {
+	sum := fnv.New32a()
+	_, _ = sum.Write([]byte(hostname()))
+	return fmt.Sprintf("pibuddy-%s-%04x", port, sum.Sum32()&0xffff)
+}
+
+func hostname() string {
+	name, err := os.Hostname()
+	if err != nil || name == "" {
+		return "unknown"
+	}
+	return name
+}
 
 // runWS serves the WebSocket tether on listen (e.g. ":51820") and advertises
 // itself over mDNS so the device can find us without a hard-coded IP.
@@ -79,15 +100,16 @@ func runWS(listen, target, approveText, denyText, herdrBin string) {
 // leaves the link silently broken as soon as dns-sd stops.
 func superviseMDNS(port string) {
 	const restartDelay = 2 * time.Second
+	instance := mdnsInstance(port)
 	for {
-		cmd := exec.Command("dns-sd", "-R", "pibuddy", wsMdnsRegType, "local", port)
+		cmd := exec.Command("dns-sd", "-R", instance, wsMdnsRegType, "local", port)
 		if err := cmd.Start(); err != nil {
 			bleLogf("WS: mDNS advertise failed: %v (device must reach us some other way)\n", err)
 			time.Sleep(restartDelay)
 			continue
 		}
-		bleLogf("WS: advertising mDNS %s.local (instance pibuddy) on port %s (pid %d)\n",
-			wsMdnsRegType, port, cmd.Process.Pid)
+		bleLogf("WS: advertising mDNS %s.local (instance %s) on port %s (pid %d)\n",
+			wsMdnsRegType, instance, port, cmd.Process.Pid)
 		werr := cmd.Wait()
 		bleLogf("WS: mDNS registration exited: %v; re-registering in %s\n", werr, restartDelay)
 		time.Sleep(restartDelay)
