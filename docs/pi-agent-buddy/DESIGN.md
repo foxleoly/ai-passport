@@ -13,9 +13,11 @@
 A wearable **coding-agent status board + light remote control**. Watch what pi is
 writing / where it is stuck / how many tokens it spent; stop a run with a button.
 
-- **In scope:** firmware (BLE NUS peripheral + LE bonding + newline-JSON protocol +
-  state machine + 6 views + 3 buttons) and a computer **sidecar** (Go CLI, the BLE
-  central) that observes the pi session and drives herdr.
+- **In scope:** firmware (240×320 LVGL board + newline-JSON protocol + state machine
+  + views + 3 buttons) and a computer **sidecar** (Go CLI) that observes the pi
+  session and drives herdr.
+- **Transports:** USB-Serial-JTAG (tethered) and Wi-Fi + WebSocket with mDNS
+  discovery (untethered) — see §4.1. BLE was dropped; see §4.1.
 - **Out of scope / non-goals:** not a security token or passkey credential holder;
   not an e-pet (the mascot is a 16px status avatar, not a 132px pet stage); does not
   use NFC (NTAG213 has no MCU API); "approve" = pi's **generic remote input**
@@ -31,21 +33,20 @@ Pixel budget (8px mono, ~30 cols; top status + bottom action bars persistent):
 | Main | ~256px | view content |
 | Action bar | ~22px | key hints, context-sensitive |
 
-### 2.1 Six views
+### 2.1 Views
+
+Implemented and cycled by the view gesture:
 1. **HOME / overall** (default landing) — pi.dev style: warm parchment, mono type,
    tri-color mosaic logo, global status summary.
 2. **LIVE** (default board) — status bar + ~15-line live activity feed + focus strip
    (current tool full text + tokens/cost) + action bar.
 3. **STATS** — model / tokens / cost / uptime / subagents / errors / last tool /
    branch / state.
-4. **MENU** — BLE / brightness / follow-live / sound / clock / transcript / unpair /
-   factory reset.
-5. **PAIRING** (overlay) — 6-digit passkey centered.
-6. **APPROVAL** (overlay) — when the agent awaits input: WAITING banner + the awaited
-   prompt + ALLOW/DENY.
+4. **MENU** — brightness / follow-live / sound / clock / transcript / factory reset.
 
-`APPROVAL` / `PAIRING` are **state-driven overlays** (appear automatically), not
-cycled views; `HOME/LIVE/STATS/MENU` are cycled by the view gesture.
+Planned, not implemented (P4, deferred): **PAIRING** overlay (6-digit passkey — moot
+now that BLE is dropped) and **APPROVAL** overlay (WAITING banner + awaited prompt +
+ALLOW/DENY), which would appear automatically rather than being cycled.
 
 ### 2.2 Activity feed lines (color-coded)
 | Line | Source | Color |
@@ -59,7 +60,7 @@ cycled views; `HOME/LIVE/STATS/MENU` are cycled by the view gesture.
 Auto-follows the latest; bounded ~48-line scrollback (no PSRAM → RAM budget).
 
 ### 2.3 pi brand tokens (extracted from pi.dev)
-```
+```text
 parchment  #F3F2F0 / #EBE7E4   (HOME / brand pages only; data pages stay dark)
 ink        #252F3D  muted #5C5752
 logo       coral #F09082 / steel #4D9ABF / amber #F1BE58 (accent #6A9FCC)
@@ -82,25 +83,47 @@ stay non-blocking — repo invariant).
 
 ## 4. Architecture
 
-### Firmware (device) — ~80% reuse of claude-buddy-port
-- ✅ Port: `buddy_ble*` (NUS + LE encryption + 6-code bonding), `buddy_protocol*`
-  (newline JSON, host-testable), `buddy_state_reduce` (pure state machine),
-  `buddy_text_wrap`, `buddy_ui_render(snapshot)` + LVGL lock pattern.
-- ✏️ Redo: layout/typography (§2), mascot (single pi avatar + states), protocol fields
-  (Claude → pi concepts).
-- Repo rule: branch from `main`, extract buddy as a **reference pattern**, do not
-  merge the demo branch; UI fully redesigned (no demo test menu).
+### 4.1 Transports
 
-### Sidecar (computer, Go CLI, BLE central)
-```
+| Path | Link | Status |
+| --- | --- | --- |
+| **A** | USB-Serial-JTAG (`/dev/usbserjtag` VFS, shared with the console) | verified on device |
+| **B** | BLE NUS peripheral (LE Secure Connections, passkey bonding) | dropped |
+| **C** | Wi-Fi STA + WebSocket client, mDNS discovery (`_pibuddy._tcp`) | verified on device |
+
+**Path B is dropped for two independent reasons.** macOS 27.0 starves third-party
+CoreBluetooth scan sessions (`AD:0(0/0)`), so the Mac-side central cannot scan; and on
+this chip BLE cannot coexist with Wi-Fi at all — NimBLE costs ~73 KB of heap, which
+starves `esp_wifi_init` on the 320 KB-SRAM C3 (measured: 97,596 B free at start,
+24,388 B after `pibud_ble_init`, 764 B left for the Wi-Fi driver, which needs ~50 KB).
+`CONFIG_BT_ENABLED=n`; the BLE sources were removed from the build and then deleted.
+
+### 4.2 Firmware (device)
+- Data channels: `pibud_usbc` (Path A) and `pibud_ws` (Path C). Both feed the same
+  newline-JSON parser and the same app event queue, so the UI is transport-agnostic.
+- Host-testable pure logic: `pibud_protocol*` (newline JSON), `pibud_state_reduce`
+  (state machine), `pibud_text_layout`, `pibud_line` (bounded RX), `pibud_i4`.
+- `pibud_ui_render(snapshot)` under `bsp_lvgl_lock()`.
+- `pibud_ws`: soft-AP provisioning (`wifi_prov_mgr`, SSID `Pi-Buddy-Setup`) → STA
+  credentials in NVS → mDNS browse → `esp_websocket_client` → app queue.
+- Repo rule: branch from `main`; UI fully redesigned (no demo test menu reuse).
+
+### 4.3 Sidecar (computer, Go CLI)
+```text
 read: tail $PI_SESSION_FILE (JSONL)   -> tool_use/toolResult/thinking/model_change/usage
       herdr api snapshot              -> agent lifecycle + subagents
-push: compose heartbeat JSON -> NUS RX(0002)
-recv: NUS TX(0003) device act -> herdr agent send-keys / prompt
+push: heartbeat JSON -> WS text frame (Path C) or USB line (Path A), every 2s
+recv: device act JSON -> herdr agent send-keys / prompt
 ```
-BLE via NUS GATT; macOS central via CoreBluetooth (Go `ble`/`bleat` or cgo). Control
-goes through `herdr agent send-keys|prompt` (CLI confirmed); do not speak raw
-`herdr.sock` protocol.
+Path C: the sidecar is the WebSocket **server** (`:51820`) and advertises
+`_pibuddy._tcp` through macOS `dns-sd -R`, which it supervises and re-registers
+because `dns-sd` has no daemon mode. Upgrades without an `Origin` header are accepted
+and browser-originated ones are rejected. Control goes through
+`herdr agent send-keys|prompt`; do not speak the raw `herdr.sock` protocol.
+
+> The sidecar must be started with an explicit `--target` (e.g. `--target w4:p1`).
+> Without it an act goes to the *focused* herdr pane, which may be the very session
+> running the sidecar.
 
 ## 5. Protocol contract (pi heartbeat, newline JSON; fields finalized in P1)
 ```json
@@ -123,14 +146,28 @@ goes through `herdr agent send-keys|prompt` (CLI confirmed); do not speak raw
 - `herdr agent send-keys` / `herdr agent prompt`: control injection points.
 
 ## 7. Phases
-| Phase | Deliverable | Acceptance |
-| --- | --- | --- |
-| **P1** | sidecar prototype: read JSONL + `herdr api snapshot` → emit heartbeat JSON (print first, BLE later) | host test + real-session print |
-| **P2** | firmware pi-buddy: BLE NUS + protocol + 6-view UI + read-only LIVE/HOME | Build + host tests + on-device |
-| **P3** | device button → sidecar → `herdr agent send-keys` interrupt | on-device: OK long actually stops the agent |
-| **P4** | MENU/PAIRING/APPROVAL + waiting approve mapping | on-device |
+| Phase | Deliverable | Acceptance | Status |
+| --- | --- | --- | --- |
+| **P1** | sidecar: read JSONL + `herdr api snapshot` → heartbeat JSON | host test + real-session print | done |
+| **P2** | firmware: protocol + view UI (HOME/LIVE/STATS/MENU) + read-only board | build + host tests + on device | done |
+| **P3** | device button → sidecar → `herdr agent send-keys` interrupt | on device: OK-long stops the agent | done over Path A and Path C |
+| **P4** | MENU/APPROVAL overlay + wait-approve mapping | on device | deferred |
 
 **MVP = P1+P2+P3, P4 deferred.**
+
+### 7.1 Bugs found and fixed during P3 acceptance (all real, all in `pibud_ws.c`)
+1. Missing `esp_netif_init()` / `esp_event_loop_create_default()` → every Wi-Fi netif
+   helper aborted inside `ESP_ERROR_CHECK`, boot-looping the device before it ever
+   reached provisioning.
+2. `esp_ip4_addr_t.addr` is network byte order; hand-shifting it produced a
+   byte-reversed host string, so the device dialled `242.145.168.192` instead of
+   `192.168.145.242` and every connect timed out.
+3. The already-provisioned path inherited `WIFI_MODE_NULL` from an earlier
+   `esp_wifi_start()`, so the station never came up and `esp_wifi_connect()` was a
+   no-op — the device never joined Wi-Fi on a normal boot.
+4. Sidecar advertised `_pibuddy.tcp` instead of `_pibuddy._tcp`; that registration
+   fails with `kDNSServiceErr_BadParam` (-65540), `dns-sd` exits 255, and the device
+   had nothing to discover.
 
 ## 8. Test matrix
 - **Host tests:** protocol parse, state-machine reduce, text wrap/clip, feed-line
@@ -143,18 +180,30 @@ goes through `herdr agent send-keys|prompt` (CLI confirmed); do not speak raw
   approval).
 
 ## 9. Open items / assumptions
-1. **Q1 default landing = HOME** (brand feel + at-a-glance global state) — confirmed.
-2. **Q2 accent dark pages with pi tri-color** (state chip uses steel/amber) or keep
-   dark pages purely functional with only HOME as the brand page — open.
-3. **sidecar BLE lib:** CoreBluetooth (cgo) vs pure-Go `ble` — decide in P2.
-4. **interrupt key sequence:** what exactly OK-long sends (plain Escape vs combo) —
-   finalize in P3 on hardware.
-5. **Assumption:** pi "approve" is generic remote input (no structured permission
+1. **Q1 default landing = HOME** — confirmed.
+2. **Q2 accent dark pages with the pi tri-color** or keep them purely functional — open.
+3. **Provisioning UX (open).** `wifi_prov_mgr`'s SoftAP scheme ships no web form, so
+   configuring Wi-Fi needs `esp_prov.py` from the Mac, and joining `Pi-Buddy-Setup`
+   costs the Mac its network. Replacing it with a self-built captive portal
+   (`esp_http_server`, cf. `examples/protocols/http_server/captive_portal`) would let
+   any phone configure the device while the Mac stays online.
+4. **WS endpoint authentication (open, security).** The endpoint listens on the whole
+   LAN, is unauthenticated, and can run `herdr agent send-keys` — so any host on the
+   network can inject keystrokes into the user's agent panes. A shared token (device
+   NVS + sidecar flag) is the minimal fix; rejecting `Origin`-bearing upgrades only
+   closes the browser path.
+5. **mDNS instance name (open).** It is the fixed string `pibuddy`, so two sidecars
+   advertising it make the device pick arbitrarily; needs a unique suffix.
+6. **Interrupt key sequence** — OK-long sends Escape (`send-keys <pane> esc`); verified.
+7. **Assumption:** pi "approve" is generic remote input (no structured permission
    dialog) — confirmed.
 
 ## 10. Validation & delivery gate
-- Iterate: `./tools/validate.sh --static`; deliver: `./tools/validate.sh` (needs
-  activated ESP-IDF 5.5.3).
+- Iterate with `./tools/validate.sh --static`; deliver with `./tools/validate.sh`
+  (needs an activated ESP-IDF 5.5.3).
+- Last recorded gate for the Path C delivery: **Build PASS, Host tests PASS, Device
+  tests PASS** (display of live session data + OK-long interrupt reaching the pinned
+  pane over Wi-Fi), no unverified board or instrument checks outstanding.
 - A successful build ≠ hardware acceptance; flashing needs approval; no pre-flash
   backup of original firmware, no default full-chip erase.
 - Commit/push only when requested or when the workflow requires it.
