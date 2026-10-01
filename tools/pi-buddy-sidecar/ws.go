@@ -51,8 +51,23 @@ func hostname() string {
 
 // runWS serves the WebSocket tether on listen (e.g. ":51820") and advertises
 // itself over mDNS so the device can find us without a hard-coded IP.
-func runWS(listen, target, approveText, denyText, herdrBin string) {
+func runWS(listen, target, approveText, denyText, herdrBin, tokenFlag string) {
 	openBleLog()
+
+	// Without a link code the endpoint is reachable by every host on the LAN, and
+	// connecting to it runs herdr input, so a code is always required.
+	tokenPath, err := defaultTokenPath()
+	if err != nil {
+		bleLogf("WS: cannot locate the link code file: %v\n", err)
+		return
+	}
+	token, err := loadOrCreateToken(tokenPath, tokenFlag)
+	if err != nil {
+		bleLogf("WS: %v\n", err)
+		return
+	}
+	bleLogf("WS: link code %s -- enter it in the device setup page (see it again with --show-token)\n",
+		token)
 
 	_, portStr, err := net.SplitHostPort(listen)
 	if err != nil {
@@ -79,16 +94,26 @@ func runWS(listen, target, approveText, denyText, herdrBin string) {
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		// The device dials "/<link code>"; anything else is refused before the
+		// upgrade, so an unauthenticated peer never reaches the act handler.
+		if r.URL.Path != "/"+token {
+			bleLogf("WS: refused %s: wrong link code\n", r.RemoteAddr)
+			http.Error(w, "link code required", http.StatusUnauthorized)
+			return
+		}
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
 			bleLogf("WS: upgrade: %v\n", err)
 			return
 		}
 		bleLogf("WS: device connected %s\n", r.RemoteAddr)
+		noteLinkOpened(r.RemoteAddr)
 		serveWS(conn, target, approveText, denyText, herdrBin)
 	})
 
 	srv := &http.Server{Addr: listen, Handler: mux}
+	// Clear any state a previous run left behind before serving.
+	publishLinkStatus(false, "")
 	bleLogf("WS: serving on %s\n", listen)
 	if err := srv.ListenAndServe(); err != nil {
 		bleLogf("WS: server stopped: %v\n", err)
@@ -119,6 +144,7 @@ func superviseMDNS(port string) {
 // serveWS pushes heartbeats and reads acts for one device connection.
 func serveWS(conn *websocket.Conn, target, approveText, denyText, herdrBin string) {
 	defer conn.Close()
+	defer noteLinkClosed()
 
 	// Reader: act JSON frames from the device (device->Mac).
 	go func() {

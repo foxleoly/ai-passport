@@ -57,6 +57,8 @@ func main() {
 		usbPath     string
 		wsMode      bool
 		wsAddr      string
+		token       string
+		showToken   bool
 	)
 	flag.StringVar(&sessionPath, "session", "", "pi session JSONL path (default: herdr focus / $PI_SESSION_FILE)")
 	flag.StringVar(&herdrBin, "herdr", "herdr", "herdr binary path")
@@ -71,10 +73,29 @@ func main() {
 	flag.StringVar(&usbPath, "usb-path", "/dev/cu.usbmodem1101", "USB-Serial-JTAG device for --usb")
 	flag.BoolVar(&wsMode, "ws", false, "run the untethered WebSocket server: advertise mDNS _pibuddy._tcp, push heartbeats, apply device acts")
 	flag.StringVar(&wsAddr, "ws-addr", ":51820", "listen address for --ws")
+	flag.StringVar(&token, "token", "", "link code for --ws (default: ~/.pi-buddy/token, created on first use)")
+	flag.BoolVar(&showToken, "show-token", false, "print the link code and exit")
 	flag.Parse()
 
+	// Printing on demand beats reading it out of a scrolling log, and it is the
+	// only workable way to read the code when the sidecar runs without a terminal.
+	if showToken {
+		path, err := defaultTokenPath()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		code, err := loadOrCreateToken(path, token)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "error:", err)
+			os.Exit(1)
+		}
+		fmt.Println(code) // bare, so it can be copied or piped
+		return
+	}
+
 	if wsMode {
-		runWS(wsAddr, target, approveText, denyText, herdrBin)
+		runWS(wsAddr, target, approveText, denyText, herdrBin, token)
 		return
 	}
 
