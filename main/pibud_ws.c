@@ -35,6 +35,7 @@
 #include "pibud_form.h"
 #include "pibud_protocol.h"
 #include "pibud_prov_html.h"
+#include "pibud_token.h"
 #include "pibud_types.h"
 
 static const char *TAG = "pibud_ws";
@@ -59,6 +60,9 @@ static esp_websocket_client_handle_t s_client;
 static ws_target_t s_target;                   // target the client is bound to
 static volatile bool s_connected;
 static char s_rx[PIBUD_WS_RX_SIZE];            // assembled WS text payload
+static char s_token[PIBUD_TOKEN_LEN + 1];      // link code shared with the sidecar
+static char s_ws_path[PIBUD_TOKEN_LEN + 2];    // "/" + link code, owned by the client
+static unsigned s_link_rejects;                // handshakes the sidecar refused
 static bool s_ctrl_started;
 static esp_event_handler_instance_t s_got_ip_hdl;
 static esp_event_handler_instance_t s_disc_hdl;
@@ -79,16 +83,24 @@ static unsigned s_connect_failures;            // consecutive join failures
 // which is long enough not to fire on a transient router outage).
 #define PIBUD_CONNECT_FALLBACK 15
 
+// A refused handshake is not a transient fault: the sidecar is reachable and is
+// rejecting the link code, which only the setup portal can fix.
+#define PIBUD_LINK_REJECT_FALLBACK 3
+
 // Credentials live in our own NVS namespace with the Wi-Fi driver's own NVS
 // storage disabled, so there is exactly one source of truth and the mode can be
 // chosen before esp_wifi_start().
 #define PIBUD_NVS_NS     "pibud"
 #define PIBUD_NVS_SSID   "wifi_ssid"
 #define PIBUD_NVS_PASS   "wifi_pass"
+#define PIBUD_NVS_TOKEN  "link_token"
 #define PIBUD_SSID_MAX   32
 #define PIBUD_PASS_MAX   64
 
 static void ws_client_ensure(const ws_target_t *t);
+// Defined with the setup portal further down, but needed here to reopen it when
+// the sidecar refuses our link code.
+static void prov_portal_start(bool resume_sta);
 
 // ---- WebSocket event handler ---------------------------------------------
 static void ws_event_cb(void *arg, esp_event_base_t base, int32_t id, void *data)
@@ -129,6 +141,14 @@ static void ws_event_cb(void *arg, esp_event_base_t base, int32_t id, void *data
     case WEBSOCKET_EVENT_ERROR:
     case WEBSOCKET_EVENT_CLOSED:
         s_connected = false;
+        // Only a refused handshake reopens the setup portal. A sidecar that is
+        // merely asleep must not make an open access point appear.
+        if (d != NULL && d->error_handle.esp_ws_handshake_status_code == 401) {
+            if (++s_link_rejects == PIBUD_LINK_REJECT_FALLBACK && s_prov_server == NULL) {
+                ESP_LOGW(TAG, "the sidecar rejected our link code; reopening the setup portal");
+                prov_portal_start(true);
+            }
+        }
         break;
     default:
         break;
@@ -158,7 +178,7 @@ static void ws_client_ensure(const ws_target_t *t)
     esp_websocket_client_config_t cfg = {0};
     cfg.host = host; // static; valid for the client's lifetime
     cfg.port = t->port;
-    cfg.path = "/";
+    cfg.path = s_ws_path; // "/" + link code; the sidecar accepts nothing else
     cfg.transport = WEBSOCKET_TRANSPORT_OVER_TCP;
     cfg.buffer_size = PIBUD_WS_RX_SIZE;
     cfg.task_stack = PIBUD_WS_CTRL_STACK;
@@ -298,7 +318,8 @@ static void prov_build_page(void)
         "<title>Pi Agent Buddy</title></head>"
         "<body style=\"font-family:system-ui;margin:2rem;max-width:30rem\">"
         "<h2>Pi Agent Buddy</h2>"
-        "<p>Choose the Wi-Fi network this device should join.</p>"
+        "<p>Choose the Wi-Fi network this device should join, then enter the link "
+        "code the sidecar printed.</p>"
         "<form method=\"post\" action=\"/save\">"
         "<p>Network<br><select name=\"ssid\" style=\"width:100%\">"
         "<option value=\"\">-- not listed / hidden --</option>";
@@ -307,6 +328,9 @@ static void prov_build_page(void)
         "<p>Only if it is not listed: network name<br>"
         "<input name=\"ssid_manual\" style=\"width:100%\" autocapitalize=\"off\""
         " autocorrect=\"off\" spellcheck=\"false\"></p>"
+        "<p>Link code<br>"
+        "<input name=\"token\" style=\"width:100%\" autocapitalize=\"off\""
+        " autocorrect=\"off\" spellcheck=\"false\" placeholder=\"printed by the sidecar\"></p>"
         "<p>Password<br><input name=\"pass\" type=\"password\" style=\"width:100%\"></p>"
         "<p><button type=\"submit\" style=\"padding:.6rem 1.2rem\">Save</button></p>"
         "</form></body></html>";
@@ -336,7 +360,10 @@ static void prov_build_page(void)
 }
 
 
-static bool prov_load_credentials(wifi_config_t *out)
+// Loads the station credentials and the link code. Both are required: the sidecar
+// refuses a handshake without the code, so a device holding only half the pair is
+// incompletely set up and belongs back in the portal.
+static bool prov_load_settings(wifi_config_t *wifi, char *token, size_t token_size)
 {
     nvs_handle_t h;
     if (nvs_open(PIBUD_NVS_NS, NVS_READONLY, &h) != ESP_OK) {
@@ -347,6 +374,7 @@ static bool prov_load_credentials(wifi_config_t *out)
     char pass[PIBUD_PASS_MAX + 1] = {0};
     size_t ssid_len = sizeof(ssid);
     size_t pass_len = sizeof(pass);
+    size_t token_len = token_size;
 
     bool ok = nvs_get_str(h, PIBUD_NVS_SSID, ssid, &ssid_len) == ESP_OK && ssid[0] != '\0';
     if (ok) {
@@ -354,15 +382,21 @@ static bool prov_load_credentials(wifi_config_t *out)
         if (nvs_get_str(h, PIBUD_NVS_PASS, pass, &pass_len) != ESP_OK) {
             pass[0] = '\0';
         }
+        if (nvs_get_str(h, PIBUD_NVS_TOKEN, token, &token_len) != ESP_OK ||
+            token_len <= 1) {
+            ok = false;
+        }
+    }
+    if (ok) {
         // A 32-character SSID fills the field exactly, so copy by length.
-        memcpy(out->sta.ssid, ssid, strnlen(ssid, PIBUD_SSID_MAX));
-        memcpy(out->sta.password, pass, strnlen(pass, PIBUD_PASS_MAX));
+        memcpy(wifi->sta.ssid, ssid, strnlen(ssid, PIBUD_SSID_MAX));
+        memcpy(wifi->sta.password, pass, strnlen(pass, PIBUD_PASS_MAX));
     }
     nvs_close(h);
     return ok;
 }
 
-static void prov_store_credentials(const wifi_config_t *cfg)
+static void prov_store_settings(const wifi_config_t *cfg, const char *token)
 {
     nvs_handle_t h;
     if (nvs_open(PIBUD_NVS_NS, NVS_READWRITE, &h) != ESP_OK) {
@@ -380,6 +414,9 @@ static void prov_store_credentials(const wifi_config_t *cfg)
     esp_err_t err = nvs_set_str(h, PIBUD_NVS_SSID, ssid);
     if (err == ESP_OK) {
         err = nvs_set_str(h, PIBUD_NVS_PASS, pass);
+    }
+    if (err == ESP_OK) {
+        err = nvs_set_str(h, PIBUD_NVS_TOKEN, token);
     }
     if (err == ESP_OK) {
         err = nvs_commit(h);
@@ -439,9 +476,20 @@ static esp_err_t prov_save_handler(httpd_req_t *req)
     }
     (void)pibud_form_get(body, received, "pass", pass, sizeof(pass));
 
-    // Length only: the password itself must never reach the log.
-    ESP_LOGI(TAG, "setup form: ssid \"%s\", password %u byte(s)", ssid,
-             (unsigned)strnlen(pass, PIBUD_PASS_MAX));
+    // The link code is read off a terminal and typed on a phone, so accept the
+    // separators and capitalisation that keyboards introduce.
+    char token_raw[48] = {0};
+    char token[PIBUD_TOKEN_LEN + 1] = {0};
+    if (pibud_form_get(body, received, "token", token_raw, sizeof(token_raw)) < 0 ||
+        pibud_token_normalize(token_raw, token, sizeof(token)) < 0) {
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "link code must be 12 hex digits");
+    }
+
+    // Lengths only: neither the password nor the link code belongs in the log.
+    ESP_LOGI(TAG, "setup form: ssid \"%s\", password %u byte(s), link code %u digit(s)",
+             ssid, (unsigned)strnlen(pass, PIBUD_PASS_MAX),
+             (unsigned)strnlen(token, PIBUD_TOKEN_LEN));
 
     wifi_config_t wc = {0};
     memcpy(wc.sta.ssid, ssid, strnlen(ssid, PIBUD_SSID_MAX));
@@ -452,7 +500,7 @@ static esp_err_t prov_save_handler(httpd_req_t *req)
     httpd_resp_set_type(req, "text/html");
     (void)httpd_resp_send(req, PROV_SAVED_PAGE, HTTPD_RESP_USE_STRLEN);
 
-    prov_store_credentials(&wc);
+    prov_store_settings(&wc, token);
     if (esp_wifi_set_config(WIFI_IF_STA, &wc) != ESP_OK) {
         ESP_LOGE(TAG, "applying Wi-Fi credentials failed");
         return ESP_OK;
@@ -678,8 +726,11 @@ esp_err_t pibud_ws_init(QueueHandle_t event_queue)
     // The Wi-Fi mode is chosen before esp_wifi_start(), so the station and the
     // setup access point never fight over the radio or the default netif.
     wifi_config_t stored = {0};
-    if (prov_load_credentials(&stored)) {
-        ESP_LOGI(TAG, "stored credentials found; connecting to the saved network");
+    if (prov_load_settings(&stored, s_token, sizeof(s_token))) {
+        // The sidecar accepts only "/<link code>", so the path is fixed for this
+        // boot.
+        snprintf(s_ws_path, sizeof(s_ws_path), "/%s", s_token);
+        ESP_LOGI(TAG, "stored settings found; connecting to the saved network");
         if (esp_wifi_set_mode(WIFI_MODE_STA) != ESP_OK ||
             esp_wifi_set_config(WIFI_IF_STA, &stored) != ESP_OK ||
             esp_wifi_start() != ESP_OK) {
@@ -692,6 +743,7 @@ esp_err_t pibud_ws_init(QueueHandle_t event_queue)
 
     // The AP netif is created by the portal itself, which also runs when the
     // setup portal reopens after failed joins.
+    ESP_LOGI(TAG, "setup incomplete; starting the setup portal");
     prov_portal_start(false);
     return ESP_OK;
 }

@@ -66,7 +66,7 @@ run_static_checks() {
             -o "${test_dir}/test_demo_${demo}_runtime"
         "${test_dir}/test_demo_${demo}_runtime"
     done
-    for pibud in state text_layout line i4 form prov_html; do
+    for pibud in state text_layout line i4 form prov_html token; do
         "${CC:-cc}" -std=c11 -Wall -Wextra -Werror -Imain \
             "tests/test_pibud_${pibud}.c" "main/pibud_${pibud}.c" \
             -o "${test_dir}/test_pibud_${pibud}"

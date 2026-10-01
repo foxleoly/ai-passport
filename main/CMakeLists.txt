@@ -8,6 +8,7 @@ idf_component_register(
          "pibud_line.c"
          "pibud_form.c"
          "pibud_prov_html.c"
+         "pibud_token.c"
          "pibud_usbc.c"
          "pibud_ws.c"
     INCLUDE_DIRS "."
