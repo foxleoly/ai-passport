@@ -4,8 +4,8 @@
 // The device has to present the code, so it must be typed once into the setup
 // page: twelve hex digits are short enough for that and long enough to make
 // guessing impractical, given the endpoint also refuses browser-originated
-// upgrades. It travels in the WebSocket path over plain ws://, so it is only as
-// private as the Wi-Fi link itself; this closes the "any host on the network can
+// upgrades. It travels in the WebSocket path over an unencrypted link, so it is only
+// as private as the Wi-Fi link itself; this closes the "any host on the network can
 // connect" hole, not a passive sniffing one.
 package main
 
@@ -49,15 +49,15 @@ func normalizeToken(raw string) (string, bool) {
 	return b.String(), true
 }
 
-// newToken returns a fresh code, grouped so it is easier to read off a terminal
-// and type on a phone.
+// newToken returns a fresh code. The printed and stored forms are the same bare
+// string, so `cat ~/.pi-buddy/token` can never disagree with what was displayed;
+// normalizeToken still accepts the grouped or upper-case variants a human types.
 func newToken() (string, error) {
 	var raw [tokenDigits / 2]byte
 	if _, err := rand.Read(raw[:]); err != nil {
 		return "", err
 	}
-	hexed := hex.EncodeToString(raw[:])
-	return fmt.Sprintf("%s-%s-%s", hexed[0:4], hexed[4:8], hexed[8:12]), nil
+	return hex.EncodeToString(raw[:]), nil
 }
 
 // defaultTokenPath is where the link code lives between runs.
@@ -93,16 +93,17 @@ func loadOrCreateToken(path, explicit string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return "", err
-	}
-	// Owner-only: this is the link's only secret.
-	if err := os.WriteFile(path, []byte(token+"\n"), 0o600); err != nil {
-		return "", err
-	}
 	normalized, ok := normalizeToken(token)
 	if !ok {
 		return "", errors.New("generated link code failed to normalize")
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return "", err
+	}
+	// Store what is actually compared, so the file and the printed code cannot
+	// disagree. Owner-only: this is the link's only secret.
+	if err := os.WriteFile(path, []byte(normalized+"\n"), 0o600); err != nil {
+		return "", err
 	}
 	return normalized, nil
 }

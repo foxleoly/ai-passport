@@ -39,6 +39,22 @@ func TestNormalizeTokenRejectsWrongInput(t *testing.T) {
 	}
 }
 
+// The stored file and the printed code must be the same string: tooling that reads
+// the file must not disagree with what the user typed into the device.
+func TestNewTokenIsAlreadyCanonical(t *testing.T) {
+	raw, err := newToken()
+	if err != nil {
+		t.Fatalf("newToken: %v", err)
+	}
+	if len(raw) != tokenDigits {
+		t.Fatalf("newToken returned %q, want %d digits", raw, tokenDigits)
+	}
+	normalized, ok := normalizeToken(raw)
+	if !ok || normalized != raw {
+		t.Fatalf("newToken returned %q, which is not the canonical form (%q, %v)", raw, normalized, ok)
+	}
+}
+
 func TestNewTokenIsUsable(t *testing.T) {
 	seen := map[string]bool{}
 	for i := 0; i < 32; i++ {
