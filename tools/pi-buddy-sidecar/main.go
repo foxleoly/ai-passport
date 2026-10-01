@@ -55,6 +55,8 @@ func main() {
 		bleMode     bool
 		usbMode     bool
 		usbPath     string
+		wsMode      bool
+		wsAddr      string
 	)
 	flag.StringVar(&sessionPath, "session", "", "pi session JSONL path (default: herdr focus / $PI_SESSION_FILE)")
 	flag.StringVar(&herdrBin, "herdr", "herdr", "herdr binary path")
@@ -67,7 +69,14 @@ func main() {
 	flag.BoolVar(&bleMode, "ble", false, "run the BLE central loop: connect Pi-*, push heartbeats, apply device acts")
 	flag.BoolVar(&usbMode, "usb", false, "run the tethered USB data loop: push heartbeats to /dev/cu.*, apply device acts")
 	flag.StringVar(&usbPath, "usb-path", "/dev/cu.usbmodem1101", "USB-Serial-JTAG device for --usb")
+	flag.BoolVar(&wsMode, "ws", false, "run the untethered WebSocket server: advertise mDNS _pibuddy._tcp, push heartbeats, apply device acts")
+	flag.StringVar(&wsAddr, "ws-addr", ":51820", "listen address for --ws")
 	flag.Parse()
+
+	if wsMode {
+		runWS(wsAddr, target, approveText, denyText, herdrBin)
+		return
+	}
 
 	if usbMode {
 		runUSB(usbPath, target, approveText, denyText, herdrBin)
