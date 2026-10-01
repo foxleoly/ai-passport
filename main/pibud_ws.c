@@ -101,6 +101,8 @@ static void ws_client_ensure(const ws_target_t *t);
 // Defined with the setup portal further down, but needed here to reopen it when
 // the sidecar refuses our link code.
 static void prov_portal_start(bool resume_sta);
+// Builds the client path from whatever s_token holds.
+static void prov_refresh_ws_path(void);
 
 // ---- WebSocket event handler ---------------------------------------------
 static void ws_event_cb(void *arg, esp_event_base_t base, int32_t id, void *data)
@@ -331,7 +333,10 @@ static void prov_build_page(void)
         "<p>Link code<br>"
         "<input name=\"token\" style=\"width:100%\" autocapitalize=\"off\""
         " autocorrect=\"off\" spellcheck=\"false\" placeholder=\"printed by the sidecar\"></p>"
-        "<p>Password<br><input name=\"pass\" type=\"password\" style=\"width:100%\"></p>"
+        "<p>Password<br><input name=\"pass\" id=\"pw\" type=\"password\" style=\"width:100%\">"
+        "<button type=\"button\" onclick=\"var p=document.getElementById('pw');"
+        "var s=p.type==='password';p.type=s?'text':'password';this.textContent=s?'Hide':'Show'\">"
+        "Show</button></p>"
         "<p><button type=\"submit\" style=\"padding:.6rem 1.2rem\">Save</button></p>"
         "</form></body></html>";
 
@@ -359,6 +364,15 @@ static void prov_build_page(void)
     s_prov_page_len = (size_t)used + (size_t)tail;
 }
 
+
+// Builds the WebSocket request path. Called both when settings are loaded and when
+// they are saved: on the boot that provisions, the code is still missing at init, and
+// an unset path makes the client send a malformed request line ("GET  HTTP/1.1") that
+// a server rejects before any handler runs.
+static void prov_refresh_ws_path(void)
+{
+    snprintf(s_ws_path, sizeof(s_ws_path), "/%s", s_token);
+}
 
 // Loads the station credentials and the link code. Both are required: the sidecar
 // refuses a handshake without the code, so a device holding only half the pair is
@@ -501,6 +515,10 @@ static esp_err_t prov_save_handler(httpd_req_t *req)
     (void)httpd_resp_send(req, PROV_SAVED_PAGE, HTTPD_RESP_USE_STRLEN);
 
     prov_store_settings(&wc, token);
+    // Only known here on the boot that provisions, so the path has to be rebuilt now
+    // rather than at init.
+    strlcpy(s_token, token, sizeof(s_token));
+    prov_refresh_ws_path();
     if (esp_wifi_set_config(WIFI_IF_STA, &wc) != ESP_OK) {
         ESP_LOGE(TAG, "applying Wi-Fi credentials failed");
         return ESP_OK;
@@ -729,7 +747,7 @@ esp_err_t pibud_ws_init(QueueHandle_t event_queue)
     if (prov_load_settings(&stored, s_token, sizeof(s_token))) {
         // The sidecar accepts only "/<link code>", so the path is fixed for this
         // boot.
-        snprintf(s_ws_path, sizeof(s_ws_path), "/%s", s_token);
+        prov_refresh_ws_path();
         ESP_LOGI(TAG, "stored settings found; connecting to the saved network");
         if (esp_wifi_set_mode(WIFI_MODE_STA) != ESP_OK ||
             esp_wifi_set_config(WIFI_IF_STA, &stored) != ESP_OK ||
