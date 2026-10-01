@@ -1,13 +1,15 @@
 // main/pibud_app.c — Pi Agent Buddy application entry + task wiring.
 //
 // Data flow:
-//   BLE NUS RX line -> pibud_protocol_parse -> pibud_event_t -> queue -> worker
+//   identity: USB line  -> pibud_protocol_parse -> pibud_event_t -> queue -> worker
+//             Wi-Fi WS   -> pibud_protocol_parse -> pibud_event_t -> queue -> worker
 //   button (UP/DN/OK click/long) -> pibud_event_t -> queue -> worker
 //   worker: pibud_state_reduce -> dispatch (UI render under bsp_lvgl_lock,
-//           BLE TX for acts, backlight, bond deletion)
+//           USB/WS TX for acts, backlight)
 #include <string.h>
 
 #include "esp_log.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 #include "nvs_flash.h"
 #include "freertos/FreeRTOS.h"
@@ -20,11 +22,11 @@
 #include "bsp_display.h"
 #include "bsp_i2c.h"
 
-#include "pibud_ble.h"
 #include "pibud_protocol.h"
 #include "pibud_state.h"
 #include "pibud_ui.h"
 #include "pibud_usbc.h"
+#include "pibud_ws.h"
 
 static const char *TAG = "pibud_app";
 
@@ -53,28 +55,21 @@ static void dispatch_action(const pibud_action_t *action)
             if (n > 0) {
                 buf[n] = '\n';
                 buf[n + 1] = '\0';
-                if (pibud_ble_send(buf, (size_t)n + 1) != ESP_OK) {
-                    ESP_LOGW(TAG, "act send failed");
-                }
-                // Also emit over the tethered USB channel when it is open.
+                // Emit over the tethered USB channel when it is open.
                 if (pibud_usbc_is_open()) {
                     if (pibud_usbc_send(buf, (size_t)n + 1) != ESP_OK) {
                         ESP_LOGW(TAG, "usbc act send failed");
                     }
                 }
+                // And over the Wi-Fi WebSocket channel when it is connected.
+                if (pibud_ws_is_connected()) {
+                    if (pibud_ws_send(buf, (size_t)n + 1) != ESP_OK) {
+                        ESP_LOGW(TAG, "ws act send failed");
+                    }
+                }
             }
             break;
         }
-    case PIBUD_ACTION_BLE_TOGGLE:
-        if (action->ble_enabled) {
-            pibud_ble_start();
-        } else {
-            pibud_ble_stop();
-        }
-        break;
-    case PIBUD_ACTION_UNPAIR_CONFIRMED:
-        pibud_ble_delete_bonds();
-        break;
     case PIBUD_ACTION_DISPLAY_BACKLIGHT:
         bsp_display_backlight(action->brightness_percent);
         break;
@@ -125,52 +120,6 @@ static void on_button(bsp_btn_t btn, bsp_btn_ev_t ev, void *user)
     (void)xQueueSend(s_queue, &e, 0);
 }
 
-static void on_ble_event(const pibud_ble_event_t *e, void *user)
-{
-    (void)user;
-    pibud_event_t ev;
-    memset(&ev, 0, sizeof(ev));
-
-    switch (e->type) {
-    case PIBUD_BLE_EVENT_CONNECTED:
-        ev.type = PIBUD_EVENT_BLE_CONNECTED;
-        ev.ble.connection_generation = e->data.connected.connection_generation;
-        break;
-    case PIBUD_BLE_EVENT_DISCONNECTED:
-        ev.type = PIBUD_EVENT_BLE_DISCONNECTED;
-        ev.ble.connection_generation = e->data.disconnected.connection_generation;
-        break;
-    case PIBUD_BLE_EVENT_PASSKEY:
-        ev.type = PIBUD_EVENT_BLE_PASSKEY;
-        ev.ble.passkey = e->data.passkey.value;
-        ev.ble.connection_generation = e->data.passkey.connection_generation;
-        break;
-    case PIBUD_BLE_EVENT_ENCRYPTION:
-        ev.type = PIBUD_EVENT_BLE_ENCRYPTION;
-        ev.ble.secure = e->data.encryption.encrypted;
-        ev.ble.connection_generation = e->data.encryption.connection_generation;
-        break;
-    case PIBUD_BLE_EVENT_BOND_DELETE_RESULT:
-        ev.type = PIBUD_EVENT_BOND_DELETE_RESULT;
-        ev.ble.success = e->data.bond_delete_result.success;
-        break;
-    case PIBUD_BLE_EVENT_RX_LINE: {
-        int rc = pibud_protocol_parse(e->data.rx_line.data, &ev);
-        if (rc != PIBUD_PROTO_OK) {
-            if (rc == PIBUD_PROTO_UNKNOWN) {
-                ESP_LOGD(TAG, "unknown protocol cmd");
-            }
-            return;
-        }
-        ev.ble.connection_generation = e->data.rx_line.connection_generation;
-        break;
-    }
-    default:
-        return;
-    }
-    (void)xQueueSend(s_queue, &ev, 0);
-}
-
 static void worker_task(void *arg)
 {
     (void)arg;
@@ -192,10 +141,10 @@ static void worker_task(void *arg)
 
 void pibud_app_start(void)
 {
-    // BLE (NimBLE) persists bonding/EAD in NVS; init before pibud_ble_init.
+    // NVS holds the Wi-Fi provisioning credentials.
     esp_err_t err = nvs_flash_init();
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "nvs_flash_init returned %d; BLE bonding persistence degraded", err);
+        ESP_LOGW(TAG, "nvs_flash_init returned %d; Wi-Fi provisioning persistence degraded", err);
     }
 
     memset(&s_settings, 0, sizeof(s_settings));
@@ -207,22 +156,18 @@ void pibud_app_start(void)
         return;
     }
 
-    pibud_ble_config_t ble_cfg;
-    memset(&ble_cfg, 0, sizeof(ble_cfg));
-    ble_cfg.event_cb = on_ble_event;
-    ble_cfg.event_context = NULL;
-    if (pibud_ble_init(&ble_cfg) != ESP_OK) {
-        ESP_LOGW(TAG, "BLE init failed; running without BLE");
-    }
-
     if (xTaskCreate(worker_task, "pibud_worker", 8192, NULL, 5, NULL) != pdPASS) {
         ESP_LOGE(TAG, "worker task create failed");
         return;
     }
-    pibud_ble_start();
-    // Tethered USB data channel (heartbeat in, act out) alongside BLE.
+    // Tethered USB data channel (heartbeat in, act out).
     if (pibud_usbc_init(s_queue) != ESP_OK) {
-        ESP_LOGW(TAG, "USB data channel unavailable; BLE only");
+        ESP_LOGW(TAG, "USB data channel unavailable");
+    }
+    // Wi-Fi data channel: SoftAP provisioning + mDNS discovery + WebSocket.
+    // Non-fatal: the device keeps working over USB if Wi-Fi is absent.
+    if (pibud_ws_init(s_queue) != ESP_OK) {
+        ESP_LOGW(TAG, "Wi-Fi data channel unavailable; USB only");
     }
 }
 
@@ -252,5 +197,5 @@ void app_main(void)
     }
 
     pibud_app_start();
-    ESP_LOGI(TAG, "ready");
+    ESP_LOGI(TAG, "ready; free heap %u", (unsigned)esp_get_free_heap_size());
 }

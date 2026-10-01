@@ -36,7 +36,13 @@ ROOT_MARKDOWN_ALLOWLIST = {
 }
 # Register only concrete, vendored component directories, e.g. "components/foo".
 # These exemptions never change the input to sensitive-content/conflict checks.
-VENDORED_DOC_ROOTS: tuple[str, ...] = ()
+# Pi Agent Buddy vendors these two esp-protocols components under components/ so
+# the Wi-Fi data channel builds from the repository alone; their upstream
+# README/CHANGELOG files intentionally have no Simplified Chinese peer.
+VENDORED_DOC_ROOTS: tuple[str, ...] = (
+    "components/esp_websocket_client",
+    "components/mdns",
+)
 
 
 def vendored_document_roots(errors: list[str]) -> tuple[Path, ...]:

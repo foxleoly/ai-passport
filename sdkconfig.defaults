@@ -31,19 +31,19 @@ CONFIG_LV_MEM_SIZE_KILOBYTES=24
 # --- 系统 ---
 CONFIG_FREERTOS_HZ=1000
 
-# --- Bluetooth LE / NimBLE ---
-# ESP32-C3 仅支持 BLE；示例只启用单连接 peripheral 所需的最小 host 配置。
-CONFIG_BT_ENABLED=y
-CONFIG_BT_NIMBLE_ENABLED=y
-CONFIG_BT_NIMBLE_ROLE_CENTRAL=n
-CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=y
-CONFIG_BT_NIMBLE_ROLE_BROADCASTER=y
-CONFIG_BT_NIMBLE_ROLE_OBSERVER=n
-CONFIG_BT_NIMBLE_MAX_CONNECTIONS=1
-CONFIG_BT_NIMBLE_HOST_BASED_PRIVACY=n
-# Pi Buddy: LE Secure Connections passkey pairing + NVS bond persistence.
-CONFIG_BT_NIMBLE_SM_SC=y
-CONFIG_BT_NIMBLE_SM_LEGACY=n
-CONFIG_BT_NIMBLE_SMP_ID_RESET=n
-CONFIG_BT_NIMBLE_UTIL_API=y
-CONFIG_BT_NIMBLE_NVS_PERSIST=y
+# --- Bluetooth LE / NimBLE: disabled for Pi Buddy ---
+# BLE (Path B) is dropped. NimBLE needs ~73 KB of heap on this 320 KB C3, which
+# starves esp_wifi_init; the Wi-Fi WebSocket channel (Path C) replaces it. The
+# path was also unusable because macOS 27.0 starves third-party CoreBluetooth
+# scan sessions. pibud_ble*.c/h stay in the tree but are not built.
+CONFIG_BT_ENABLED=n
+
+# --- Pi Buddy Wi-Fi 数据通道（软 AP 配网 + mDNS 发现 + WebSocket）---
+# 首次开机起 SoftAP 临时 SSID 让用户配一次 WiFi（凭据存 NVS），之后自动连 STA；
+# 设备侧用 mDNS 发现 Mac 的 WebSocket server（_pibuddy._tcp）。
+CONFIG_ESP_WIFI_ENABLED=y
+CONFIG_ESP_WIFI_SOFTAP_SUPPORT=y
+# esp_websocket_client（esp-protocols）需要 tcp_transport 的 WS transport 才编译源。
+CONFIG_WS_TRANSPORT=y
+# wifi_prov SoftAP 方案用 protocomm HTTP；SECURITY_0 = 明文（仅本地首次配网）。
+CONFIG_ESP_PROTOCOMM_SUPPORT_SECURITY_VERSION_0=y
