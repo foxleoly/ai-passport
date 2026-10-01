@@ -19,6 +19,10 @@ BLE was **dropped**: macOS 27.0 starves third-party CoreBluetooth scanning, and
 NimBLE's ~73 KB of heap does not leave room for `esp_wifi_init` on this 320 KB C3.
 Reasoning and measurements: `DESIGN.md` §4.1.
 
+Wi-Fi setup is a self-built captive portal, not `wifi_prov_mgr`: a phone joins
+`Pi-Buddy-Setup`, picks the network from a scanned list, and types only the password.
+Details: `DESIGN.md` §9.3.
+
 ## 2. Git state
 
 - Branch: `feature/pi-agent-buddy` (from `main`).
@@ -48,23 +52,25 @@ Reasoning and measurements: `DESIGN.md` §4.1.
   act ok: {"id":"cli:agent:send-keys","result":{"type":"ok"}}
   ```
 
+- **Provisioning portal (verified on device).** The device runs its own captive
+  portal on `Pi-Buddy-Setup` with a scanned network picker; a phone configured it
+  end to end, and the log shows the full chain: `setup form: ssid "..."` →
+  `credentials saved` → `sta ip: ...` → `setup access point closed` →
+  `websocket connected`. Replaces `wifi_prov_mgr` + `esp_prov.py`, and the Mac keeps
+  its network throughout.
 - **Gates:** `./tools/validate.sh --static` PASS; `--firmware` PASS (merged image
   verified).
 - **Environment:** ESP-IDF 5.5.3 at `~/esp/esp-idf-v5.5.3` (target `esp32c3`).
 
 ## 4. Not done (next, in order)
 
-1. **Provisioning UX.** `wifi_prov_mgr`'s SoftAP scheme ships no web form, so Wi-Fi
-   setup needs `esp_prov.py` from the Mac and joining `Pi-Buddy-Setup` costs the Mac
-   its network. Replace it with a self-built captive portal (`esp_http_server`) so a
-   phone can configure the device while the Mac stays online. See DESIGN.md §9.3.
-2. **WebSocket authentication (security).** The endpoint listens on the whole LAN,
+1. **WebSocket authentication (security).** The endpoint listens on the whole LAN,
    is unauthenticated, and can run `herdr agent send-keys`, so any host on the
    network can inject keystrokes into the user's agent panes. Minimal fix: a shared
    token in device NVS and a sidecar flag. See DESIGN.md §9.4.
-3. **Unique mDNS instance name.** It is the literal `pibuddy`, so two sidecars make
+2. **Unique mDNS instance name.** It is the literal `pibuddy`, so two sidecars make
    the device choose arbitrarily.
-4. **P4** — settings NVS persistence, MENU polish, approval overlay, dark-page pi
+3. **P4** — settings NVS persistence, MENU polish, approval overlay, dark-page pi
    accents (open Q2).
 
 ## 5. Commands
@@ -94,18 +100,11 @@ python -m esptool --chip esp32c3 -p /dev/cu.usbmodem1101 -b 460800 \
   write_flash 0x10000 build/FoloToy-AI-Passport.bin
 ```
 
-Provisioning a new network (device shows SoftAP `Pi-Buddy-Setup` when it has no
-stored credentials):
-
-```bash
-export IDF_PATH=~/esp/esp-idf-v5.5.3
-python $IDF_PATH/tools/esp_prov/esp_prov.py --transport softap \
-  --service_name 192.168.4.1 --sec_ver 0 --ssid "<ssid>" --passphrase "<pass>"
-```
-
-`esp_prov.py` needs `protobuf` and `cryptography`, which the ESP-IDF Python
-environment does not provide; install them into a throwaway virtualenv rather than
-the shared one.
+Provisioning (or re-provisioning) a network is done from a phone browser: join
+`Pi-Buddy-Setup`, open `http://192.168.4.1/`, pick the network from the list, type
+the password, save. The portal appears when the device has no stored credentials and
+reopens by itself after roughly 30 s of failed joins, so a mistyped password is
+recoverable without a cable. No computer or `esp_prov.py` is involved.
 
 ## 6. Machine-specific env notes (this Mac)
 
@@ -126,7 +125,10 @@ the shared one.
 - "approve" means pi generic remote input (`herdr agent prompt` / `send-keys`), not a
   structured permission dialog.
 - The Mac is the tethered/untethered host, never the phone.
-- Wi-Fi credentials live in device NVS via provisioning; they are never committed.
+- Wi-Fi credentials live in the `pibud` NVS namespace, never in the repository, and
+  the Wi-Fi driver's own NVS persistence is off so there is one source of truth.
+- Provisioning is the self-built captive portal described above; `wifi_prov_mgr`,
+  `protocomm`, and `esp_prov.py` are no longer part of the flow.
 
 ## 8. Open assumptions (need a call)
 
@@ -137,7 +139,7 @@ the shared one.
 
 ## 9. File map
 
-- Firmware: `main/pibud_{types,state,protocol,text_layout,i4,line,usbc,ws,ui,app}.{c,h}`
+- Firmware: `main/pibud_{types,state,protocol,text_layout,i4,line,form,prov_html,usbc,ws,ui,app}.{c,h}`
 - Sidecar: `tools/pi-buddy-sidecar/{go.mod,main.go,event.go,herdr.go,usb.go,ws.go,ble_central.m}`
   (`ble.go` / `ble_central.m` are the dead Path B central, kept for reference only)
 - Vendored components: `components/esp_websocket_client`, `components/mdns`

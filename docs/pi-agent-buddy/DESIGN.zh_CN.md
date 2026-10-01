@@ -102,8 +102,11 @@ BLE 与 Wi-Fi 根本不能共存——NimBLE 占 ~73 KB 堆，在 320 KB SRAM �
 - 可跑 host 测试的纯逻辑：`pibud_protocol*`（换行 JSON）、`pibud_state_reduce`
   （状态机）、`pibud_text_layout`、`pibud_line`（有界收包）、`pibud_i4`。
 - `pibud_ui_render(snapshot)` 在 `bsp_lvgl_lock()` 保护下调用。
-- `pibud_ws`：软 AP 配网（`wifi_prov_mgr`，SSID `Pi-Buddy-Setup`）→ STA 凭据存
-  NVS → mDNS 浏览 → `esp_websocket_client` → 应用队列。
+- `pibud_ws`：自建 SoftAP 配网门户（`esp_http_server`，SSID `Pi-Buddy-Setup`）
+  → 凭据存入自建 NVS 命名空间 → STA → mDNS 浏览 → `esp_websocket_client` →
+  应用队列。
+- 可跑 host 测试的配网逻辑：`pibud_form`（urlencoded 解码）与 `pibud_prov_html`
+  （HTML 转义与网络选择列表）。
 - 仓库规则：从 `main` 拉分支；UI 完全重做（不复用 demo 测试菜单）。
 
 ### 4.3 sidecar（电脑侧，Go CLI）
@@ -160,9 +163,22 @@ Path C 下 sidecar 是 WebSocket **服务端**（`:51820`），并通过 macOS �
 4. sidecar 广播的是 `_pibuddy.tcp` 而非 `_pibuddy._tcp`；该注册会以
    `kDNSServiceErr_BadParam`（-65540）失败，`dns-sd` 以 255 退出，设备无从发现。
 
+### 7.2 替换配网路径时发现的缺陷
+- **恢复路径上的配网 AP 没有自己的 netif。** AP netif 只在首次配网分支里创建，
+  于是重开的门户把射频拉起来却没有 DHCP 服务器；客户端能关联但永远拿不到租约。
+- **重开的门户扫不了网。** 重连循环让 STA 停在 connecting 状态，而驱动此时拒绝
+  扫描，选择列表恰好在最需要它的时候是空的。现在门户会先暂停重连并断开，扫完
+  再恢复。
+- **重连循环仍在反复扫描一个已经连不上的网络。** 扫描中的 STA 会与 SoftAP 争
+  射频，从而拖累用户正在加载的页面，所以门户打开期间限制了重试次数。
+- **`nvs_set_str` 被直接传入了定长凭据字段。** 满长 SSID 会把字段填满且没有结束
+  符，可能越界读取。
+- **配网 POST 用单次 `httpd_req_recv` 读取请求体，** 而它并不保证一次读完。
+
 ## 8. 测试矩阵
-- **host 测试：** 协议解析、状态机 reduce、文本换行/裁剪、活动流行格式化（全为
-  纯逻辑，与 ESP-IDF/LVGL 解耦）；sidecar 的 JSONL 解析 + herdr 调用封装。
+- **host 测试：** 协议解析、状态机 reduce、文本换行/裁剪、活动流行格式化、
+  urlencoded 表单解码、配网页 HTML 转义（全为纯逻辑，与 ESP-IDF/LVGL 解耦）；
+  sidecar 的 JSONL 解析 + herdr 调用封装。
 - **真机测试：** 240×320 各视图/各行/超长字符串渲染、无看门狗 soak、绑定、
   OK 长按中断。
 - **交付四字段：** 分开报告 `Build / Host tests / Device tests / Unverified`；
@@ -171,11 +187,13 @@ Path C 下 sidecar 是 WebSocket **服务端**（`:51820`），并通过 macOS �
 ## 9. 待办项 / 假设
 1. **Q1 默认落地页 = HOME** —— 已确认。
 2. **Q2 深色页是否点缀 pi 三色** —— 待定。
-3. **配网 UX（待办）。** `wifi_prov_mgr` 的 SoftAP 方案不带网页表单，配 Wi-Fi 得
-   用 Mac 上的 `esp_prov.py`，而连上 `Pi-Buddy-Setup` 会让 Mac 断网。改用自建
-   captive portal（`esp_http_server`，参考
-   `examples/protocols/http_server/captive_portal`）就能让任意手机配网、Mac 保持
-   在线。
+3. **配网 UX —— 已实现。** `wifi_prov_mgr` 的 SoftAP 方案不带网页表单，配 Wi-Fi
+   得用电脑上的 `esp_prov.py`，而连上 `Pi-Buddy-Setup` 会让那台电脑断网。现在设备
+   自带 captive portal：扫描结果填充网络选择列表，另留一个文本框供隐藏网络使用；
+   未知路径返回重定向，手机才会弹出登录面板；凭据写入自建 NVS 命名空间；STA 一
+   上网门户即关闭。仅本地首次配网用，所以 AP 是开放的、表单是明文 HTTP。若 STA
+   连不上，约 30 秒后门户会重开，让输错密码不至于把用户锁在门外；门户开着期间
+   STA 停止重试，因为扫描中的 STA 会与 SoftAP 争射频。
 4. **WS 端点鉴权（待办，安全）。** 该端点监听整个局域网、无认证，且能执行
    `herdr agent send-keys`——网内任何主机都能往用户的 agent pane 注入按键。最小
    修法是共享 token（设备 NVS + sidecar 参数）；拒绝带 `Origin` 的升级只堵住了

@@ -104,8 +104,11 @@ starves `esp_wifi_init` on the 320 KB-SRAM C3 (measured: 97,596 B free at start,
 - Host-testable pure logic: `pibud_protocol*` (newline JSON), `pibud_state_reduce`
   (state machine), `pibud_text_layout`, `pibud_line` (bounded RX), `pibud_i4`.
 - `pibud_ui_render(snapshot)` under `bsp_lvgl_lock()`.
-- `pibud_ws`: soft-AP provisioning (`wifi_prov_mgr`, SSID `Pi-Buddy-Setup`) → STA
-  credentials in NVS → mDNS browse → `esp_websocket_client` → app queue.
+- `pibud_ws`: self-built SoftAP setup portal (`esp_http_server`, SSID
+  `Pi-Buddy-Setup`) → credentials in our own NVS namespace → STA → mDNS browse →
+  `esp_websocket_client` → app queue.
+- Host-testable provisioning logic: `pibud_form` (urlencoded decoding) and
+  `pibud_prov_html` (HTML escaping and the network picker).
 - Repo rule: branch from `main`; UI fully redesigned (no demo test menu reuse).
 
 ### 4.3 Sidecar (computer, Go CLI)
@@ -169,10 +172,27 @@ and browser-originated ones are rejected. Control goes through
    fails with `kDNSServiceErr_BadParam` (-65540), `dns-sd` exits 255, and the device
    had nothing to discover.
 
+### 7.2 Defects found while replacing the provisioning path
+- **The setup access point had no netif on the recovery path.** The AP netif was
+  created only in the first-run branch, so a reopened portal brought the radio up
+  without a DHCP server; clients associated and never got a lease.
+- **A reopened portal could not scan.** The reconnect loop left the station in the
+  connecting state, and the driver refuses to scan then, so the picker was empty
+  exactly when it was needed. The portal now pauses the loop and disconnects before
+  scanning, then resumes it.
+- **The loop kept rescanning for a network it had already failed to join.** A
+  scanning station shares the radio with the access point, which degrades the page
+  the user is loading, so retries are capped while the portal is open.
+- **`nvs_set_str` was handed fixed-size credential fields directly.** A
+  maximum-length SSID fills the field with no terminator, so it could read past it.
+- **The setup POST read the body with a single `httpd_req_recv`,** which is not
+  guaranteed to return the whole body.
+
 ## 8. Test matrix
 - **Host tests:** protocol parse, state-machine reduce, text wrap/clip, feed-line
-  formatting (all pure logic, decoupled from ESP-IDF/LVGL); sidecar JSONL parse +
-  herdr call wrapping.
+  formatting, urlencoded form decoding, and provisioning-page HTML escaping (all
+  pure logic, decoupled from ESP-IDF/LVGL); sidecar JSONL parse + herdr call
+  wrapping.
 - **Device tests:** 240×320 per-view/per-line/long-string rendering, watchdog-free
   soak, bonding, OK-long interrupt.
 - **Delivery four fields:** report `Build / Host tests / Device tests / Unverified`
@@ -182,11 +202,16 @@ and browser-originated ones are rejected. Control goes through
 ## 9. Open items / assumptions
 1. **Q1 default landing = HOME** — confirmed.
 2. **Q2 accent dark pages with the pi tri-color** or keep them purely functional — open.
-3. **Provisioning UX (open).** `wifi_prov_mgr`'s SoftAP scheme ships no web form, so
-   configuring Wi-Fi needs `esp_prov.py` from the Mac, and joining `Pi-Buddy-Setup`
-   costs the Mac its network. Replacing it with a self-built captive portal
-   (`esp_http_server`, cf. `examples/protocols/http_server/captive_portal`) would let
-   any phone configure the device while the Mac stays online.
+3. **Provisioning UX — implemented.** `wifi_prov_mgr`'s SoftAP scheme ships no web
+   form, so it needed `esp_prov.py` on a computer, and joining `Pi-Buddy-Setup` cost
+   that computer its network. The device now runs its own captive portal: the scan
+   fills a network picker plus a free-text field for hidden networks, an unknown path
+   answers with a redirect so phones offer the sign-in sheet, credentials go to our
+   own NVS namespace, and the portal closes as soon as the station is online. Local
+   first-run only, so the AP is open and the form is plain HTTP. If the station
+   cannot join, the portal reopens after about 30 s so a mistyped password cannot
+   lock the user out; while it is open the station stops retrying, because a scanning
+   station shares the radio with the access point.
 4. **WS endpoint authentication (open, security).** The endpoint listens on the whole
    LAN, is unauthenticated, and can run `herdr agent send-keys` — so any host on the
    network can inject keystrokes into the user's agent panes. A shared token (device

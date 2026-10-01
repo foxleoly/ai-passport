@@ -17,6 +17,9 @@ BLE 已**移除**：macOS 27.0 会让第三方 CoreBluetooth 扫描饿死，且 
 ~73 KB 堆，这颗 320 KB SRAM 的 C3 上再放不下 `esp_wifi_init`。推断与实测数据见
 `DESIGN.zh_CN.md` §4.1。
 
+Wi-Fi 配网是自建 captive portal，不再用 `wifi_prov_mgr`：手机连 `Pi-Buddy-Setup`，
+从扫描出的列表里选网络，只需输密码。细节见 `DESIGN.zh_CN.md` §9.3。
+
 ## 2. git 状态
 
 - 分支：`feature/pi-agent-buddy`（从 `main` 拉出）。
@@ -45,21 +48,22 @@ BLE 已**移除**：macOS 27.0 会让第三方 CoreBluetooth 扫描饿死，且 
   act ok: {"id":"cli:agent:send-keys","result":{"type":"ok"}}
   ```
 
+- **配网门户（真机验证通过）。** 设备自带 captive portal（SSID `Pi-Buddy-Setup`），
+  页面里的网络列表来自扫描；手机走完了整个流程，日志显示完整链路：
+  `setup form: ssid "..."` → `credentials saved` → `sta ip: ...` →
+  `setup access point closed` → `websocket connected`。取代了 `wifi_prov_mgr` 与
+  `esp_prov.py`，且全程不影响 Mac 的网络。
 - **门槛：** `./tools/validate.sh --static` PASS；`--firmware` PASS（合并镜像已校验）。
 - **环境：** ESP-IDF 5.5.3 在 `~/esp/esp-idf-v5.5.3`（target `esp32c3`）。
 
 ## 4. 未完成（按顺序）
 
-1. **配网 UX。** `wifi_prov_mgr` 的 SoftAP 方案不带网页表单，所以配 Wi-Fi 得用
-   Mac 上的 `esp_prov.py`，而连上 `Pi-Buddy-Setup` 会让 Mac 断网。改成自建
-   captive portal（`esp_http_server`），让手机就能配网、Mac 保持在线。见
-   `DESIGN.zh_CN.md` §9.3。
-2. **WebSocket 鉴权（安全）。** 该端点监听整个局域网、无认证，且能执行
-   `herdr agent send-keys`——网内任何主机都能往用户的 agent pane 注入按键。
-   最小修法：共享 token（设备 NVS + sidecar 参数）。见 `DESIGN.zh_CN.md` §9.4。
-3. **mDNS 实例名唯一化。** 现在硬编码为 `pibuddy`，两个 sidecar 同时广播会让
+1. **WebSocket 鉴权（安全）。** 该端点监听整个局域网、无认证，且能执行
+   `herdr agent send-keys`——网内任何主机都能往用户的 agent pane 注入按键。最小
+   修法：共享 token（设备 NVS + sidecar 参数）。见 `DESIGN.zh_CN.md` §9.4。
+2. **mDNS 实例名唯一化。** 现在硬编码为 `pibuddy`，两个 sidecar 同时广播会让
    设备任选一个。
-4. **P4** — settings NVS 持久化、MENU 打磨、批准弹层、深色页 pi 三色点缀（Q2）。
+3. **P4** — settings NVS 持久化、MENU 打磨、批准弹层、深色页 pi 三色点缀（Q2）。
 
 ## 5. 命令
 
@@ -88,16 +92,10 @@ python -m esptool --chip esp32c3 -p /dev/cu.usbmodem1101 -b 460800 \
   write_flash 0x10000 build/FoloToy-AI-Passport.bin
 ```
 
-给设备配新网络（设备无凭据时会起 SoftAP `Pi-Buddy-Setup`）：
-
-```bash
-export IDF_PATH=~/esp/esp-idf-v5.5.3
-python $IDF_PATH/tools/esp_prov/esp_prov.py --transport softap \
-  --service_name 192.168.4.1 --sec_ver 0 --ssid "<ssid>" --passphrase "<pass>"
-```
-
-`esp_prov.py` 需要 `protobuf` 与 `cryptography`，而 ESP-IDF 的 Python 环境并不
-提供；请装进一次性虚拟环境，别动共用的那个。
+配网（或重新配网）在手机浏览器里完成：连 `Pi-Buddy-Setup`，打开
+`http://192.168.4.1/`，从列表里选网络，输密码，保存。设备没有已存凭据时门户会
+出现；连续连不上约 30 秒后它会自行重开，所以密码输错也能不插线救回来。全程不
+需要电脑，也不需要 `esp_prov.py`。
 
 ## 6. 本机环境注意（这台 Mac）
 
@@ -117,7 +115,10 @@ python $IDF_PATH/tools/esp_prov/esp_prov.py --transport softap \
 - "批准" = pi 通用远程输入（`herdr agent prompt` / `send-keys`），非结构化权限
   弹窗。
 - 电脑（Mac）是有线/无线链路的主机，手机不是。
-- Wi-Fi 凭据经配网存入设备 NVS，绝不入库。
+- Wi-Fi 凭据存在自建 `pibud` NVS 命名空间，绝不入库；Wi-Fi 驱动自带的 NVS 持久
+  化已关闭，保证只有一个数据源。
+- 配网就是上面那个自建 captive portal；`wifi_prov_mgr`、`protocomm` 与
+  `esp_prov.py` 都不再参与流程。
 
 ## 8. 待拍板假设
 
@@ -127,7 +128,7 @@ python $IDF_PATH/tools/esp_prov/esp_prov.py --transport softap \
 
 ## 9. 文件清单
 
-- 固件：`main/pibud_{types,state,protocol,text_layout,i4,line,usbc,ws,ui,app}.{c,h}`
+- 固件：`main/pibud_{types,state,protocol,text_layout,i4,line,form,prov_html,usbc,ws,ui,app}.{c,h}`
 - sidecar：`tools/pi-buddy-sidecar/{go.mod,main.go,event.go,herdr.go,usb.go,ws.go,ble_central.m}`
   （`ble.go` / `ble_central.m` 是已废弃的 Path B central，仅留作参考）
 - vendored 组件：`components/esp_websocket_client`、`components/mdns`
