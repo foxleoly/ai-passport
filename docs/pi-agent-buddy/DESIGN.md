@@ -204,6 +204,11 @@ has to be typed). Install by symlinking it into `~/.pi/agent/extensions/`.
   maximum-length SSID fills the field with no terminator, so it could read past it.
 - **The setup POST read the body with a single `httpd_req_recv`,** which is not
   guaranteed to return the whole body.
+- **The link-code path was only built at init.** On the boot that provisions, the code
+  is still missing when the interface initialises, so the client sent a request line
+  with an empty target (`GET  HTTP/1.1`). A server rejects that with 400 before any
+  handler runs, which is why the refusal never appeared in the sidecar's log. The path
+  is now rebuilt whenever the code is loaded or saved.
 
 ## 8. Test matrix
 - **Host tests:** protocol parse, state-machine reduce, text wrap/clip, feed-line
@@ -228,7 +233,8 @@ has to be typed). Install by symlinking it into `~/.pi/agent/extensions/`.
    first-run only, so the AP is open and the form is plain HTTP. If the station
    cannot join, the portal reopens after about 30 s so a mistyped password cannot
    lock the user out; while it is open the station stops retrying, because a scanning
-   station shares the radio with the access point.
+   station shares the radio with the access point. The password field has a Show toggle,
+   since the code is typed once from a phone keyboard and a typo costs a whole retry.
 4. **WS endpoint authentication — implemented.** The endpoint listens on the whole
    LAN and can run `herdr agent send-keys`, so any host could inject keystrokes into
    the user's agent panes. The device now dials `/<link code>` and everything else is
