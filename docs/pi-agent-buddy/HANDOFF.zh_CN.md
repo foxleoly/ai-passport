@@ -53,17 +53,22 @@ Wi-Fi 配网是自建 captive portal，不再用 `wifi_prov_mgr`：手机连 `Pi
   `setup form: ssid "..."` → `credentials saved` → `sta ip: ...` →
   `setup access point closed` → `websocket connected`。取代了 `wifi_prov_mgr` 与
   `esp_prov.py`，且全程不影响 Mac 的网络。
+- **链接码（已实现）。** WebSocket 端点不再对局域网开放：设备走 `/<链接码>`，其他
+  一律在升级前被 401 拒绝。链接码只生成一次到 `~/.pi-buddy/token`（权限 600），可
+  用 `--show-token` 重复打印，并由用户在配网页输入（该字段容忍手机键盘带来的分隔
+  符与大小写）。握手被拒三次会重开配网门户；连不上则不会。
+- **pi 扩展。** `tools/pi-buddy-extension/pibuddy.ts`（软链到
+  `~/.pi/agent/extensions/`）会从 sidecar 发布的 `~/.pi-buddy/status.json` 读取链路
+  状态并显示在 pi 底部状态栏，`/pibuddy` 汇报状态并提供把配对码复制到剪贴板。
 - **门槛：** `./tools/validate.sh --static` PASS；`--firmware` PASS（合并镜像已校验）。
 - **环境：** ESP-IDF 5.5.3 在 `~/esp/esp-idf-v5.5.3`（target `esp32c3`）。
 
 ## 4. 未完成（按顺序）
 
-1. **WebSocket 鉴权（安全）。** 该端点监听整个局域网、无认证，且能执行
-   `herdr agent send-keys`——网内任何主机都能往用户的 agent pane 注入按键。最小
-   修法：共享 token（设备 NVS + sidecar 参数）。见 `DESIGN.zh_CN.md` §9.4。
-2. **mDNS 实例名唯一化。** 现在硬编码为 `pibuddy`，两个 sidecar 同时广播会让
-   设备任选一个。
-3. **P4** — settings NVS 持久化、MENU 打磨、批准弹层、深色页 pi 三色点缀（Q2）。
+1. **P4** — settings NVS 持久化、MENU 打磨、批准弹层、深色页 pi 三色点缀（Q2）。
+2. **扩展没有入库测试。** 它的逻辑用一次性的假 `pi` 夹具验证过（工厂、`/pibuddy`、
+   生命周期、关闭、无界面保护），但本仓库还没有 JavaScript 测试约定，所以门槛里
+   没有它。
 
 ## 5. 命令
 
@@ -86,6 +91,9 @@ go test ./...
 # sidecar：跑免线路径。务必带 --target；不带时动作会打到当前聚焦的 herdr
 # pane，而那可能正是跑 sidecar 的这个会话。
 /tmp/pi-buddy-sidecar --ws --ws-addr :51820 --target w4:p1
+
+# 打印设备配网页要的链接码（首次 --ws 运行时生成）
+/tmp/pi-buddy-sidecar --show-token
 
 # 刷机：只刷 app 分区，保留 NVS 里的 Wi-Fi 凭据。需批准。
 python -m esptool --chip esp32c3 -p /dev/cu.usbmodem1101 -b 460800 \
@@ -129,8 +137,9 @@ python -m esptool --chip esp32c3 -p /dev/cu.usbmodem1101 -b 460800 \
 ## 9. 文件清单
 
 - 固件：`main/pibud_{types,state,protocol,text_layout,i4,line,form,prov_html,usbc,ws,ui,app}.{c,h}`
-- sidecar：`tools/pi-buddy-sidecar/{go.mod,main.go,event.go,herdr.go,usb.go,ws.go,ble_central.m}`
+- sidecar：`tools/pi-buddy-sidecar/{go.mod,main.go,event.go,herdr.go,usb.go,ws.go,token.go,status.go,ble_central.m}`
   （`ble.go` / `ble_central.m` 是已废弃的 Path B central，仅留作参考）
+- 扩展：`tools/pi-buddy-extension/pibuddy.ts`（软链到 `~/.pi/agent/extensions/`）
 - vendored 组件：`components/esp_websocket_client`、`components/mdns`
 - 文档：`docs/pi-agent-buddy/DESIGN{,.zh_CN}.md`、本交接
 - 门槛：`tools/validate.sh`（已注册 pibud host 测试）、`tools/check_repo.py`

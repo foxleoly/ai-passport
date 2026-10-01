@@ -128,6 +128,23 @@ and browser-originated ones are rejected. Control goes through
 > Without it an act goes to the *focused* herdr pane, which may be the very session
 > running the sidecar.
 
+The endpoint is not open to the LAN: the device must dial `/<link code>`, a 12-digit
+hex code the sidecar generates once into `~/.pi-buddy/token` (reprint it with
+`--show-token`). Anything else is refused with 401 before the upgrade, so an
+unauthenticated peer never reaches the act handler. The code travels in the path over
+plain `ws://`, so it closes the "any host on the network can connect" hole, not a
+passive-sniffing one.
+
+The sidecar also publishes its link state to `~/.pi-buddy/status.json`
+(`connected`, `device`, `pid`, `updated`) so anything on the machine can display it
+without IPC; the pid lets a reader tell a dead sidecar's stale file from a live link.
+
+### 4.4 pi extension (computer)
+`tools/pi-buddy-extension/pibuddy.ts` shows the link state in the pi footer by reading
+`status.json`, and `/pibuddy` reports it and offers to copy the pair code to the
+clipboard (macOS shares the clipboard with a nearby iPhone, which is where the code
+has to be typed). Install by symlinking it into `~/.pi/agent/extensions/`.
+
 ## 5. Protocol contract (pi heartbeat, newline JSON; fields finalized in P1)
 ```json
 {"cmd":"hb","model":"agnes-3.0-flash","state":"running",
@@ -212,13 +229,16 @@ and browser-originated ones are rejected. Control goes through
    cannot join, the portal reopens after about 30 s so a mistyped password cannot
    lock the user out; while it is open the station stops retrying, because a scanning
    station shares the radio with the access point.
-4. **WS endpoint authentication (open, security).** The endpoint listens on the whole
-   LAN, is unauthenticated, and can run `herdr agent send-keys` — so any host on the
-   network can inject keystrokes into the user's agent panes. A shared token (device
-   NVS + sidecar flag) is the minimal fix; rejecting `Origin`-bearing upgrades only
-   closes the browser path.
-5. **mDNS instance name (open).** It is the fixed string `pibuddy`, so two sidecars
-   advertising it make the device pick arbitrarily; needs a unique suffix.
+4. **WS endpoint authentication — implemented.** The endpoint listens on the whole
+   LAN and can run `herdr agent send-keys`, so any host could inject keystrokes into
+   the user's agent panes. The device now dials `/<link code>` and everything else is
+   refused before the upgrade; the code is generated once, kept in `~/.pi-buddy/token`
+   (mode 600) and typed into the setup page, where `pibud_token` accepts the
+   separators and capitalisation a phone keyboard introduces. A refused handshake
+   reopens the setup portal after three tries, while an unreachable sidecar does not —
+   an open access point must not appear merely because the Mac is asleep.
+5. **mDNS instance name** — the registration is now `pibuddy-<port>-<host hash>`, so a
+   second sidecar no longer competes for the name and steals the device.
 6. **Interrupt key sequence** — OK-long sends Escape (`send-keys <pane> esc`); verified.
 7. **Assumption:** pi "approve" is generic remote input (no structured permission
    dialog) — confirmed.

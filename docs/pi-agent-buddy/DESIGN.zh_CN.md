@@ -124,6 +124,21 @@ Path C 下 sidecar 是 WebSocket **服务端**（`:51820`），并通过 macOS �
 > sidecar 必须显式带 `--target`（例如 `--target w4:p1`）。不带时动作会打到当前
 > **聚焦**的 herdr pane，而那可能正是跑 sidecar 的这个会话。
 
+该端点不再对局域网开放：设备必须走 `/<链接码>`，而链接码是 sidecar 首次运行时
+生成到 `~/.pi-buddy/token` 的 12 位十六进制码（用 `--show-token` 再次打印）。其他
+路径一律在升级前被 401 拒绝，未认证的对端永远碰不到 act 处理逻辑。链接码通过路径
+在明文 `ws://` 上传送，所以它堵的是「网内任意主机都能连上」这个洞，而不是被动嗅探。
+
+sidecar 还会把链路状态发布到 `~/.pi-buddy/status.json`（`connected`、`device`、
+`pid`、`updated`），让本机任何程序无需 IPC 就能显示它；pid 用来区分「sidecar 已死
+留下的陈旧文件」和「真实在线的链路」。
+
+### 4.4 pi 扩展（电脑侧）
+`tools/pi-buddy-extension/pibuddy.ts` 读取 `status.json`，把链路状态显示在 pi 的底部
+状态栏，`/pibuddy` 则汇报状态并提供把配对码复制到剪贴板（macOS 剪贴板会与就近的
+iPhone 共享，而那个码本来就得在手机上输入）。安装方式：把它软链到
+`~/.pi/agent/extensions/`。
+
 ## 5. 协议契约（pi heartbeat，换行 JSON；字段在 P1 定稿）
 ```json
 {"cmd":"hb","model":"agnes-3.0-flash","state":"running",
@@ -194,12 +209,14 @@ Path C 下 sidecar 是 WebSocket **服务端**（`:51820`），并通过 macOS �
    上网门户即关闭。仅本地首次配网用，所以 AP 是开放的、表单是明文 HTTP。若 STA
    连不上，约 30 秒后门户会重开，让输错密码不至于把用户锁在门外；门户开着期间
    STA 停止重试，因为扫描中的 STA 会与 SoftAP 争射频。
-4. **WS 端点鉴权（待办，安全）。** 该端点监听整个局域网、无认证，且能执行
-   `herdr agent send-keys`——网内任何主机都能往用户的 agent pane 注入按键。最小
-   修法是共享 token（设备 NVS + sidecar 参数）；拒绝带 `Origin` 的升级只堵住了
-   浏览器这一条路。
-5. **mDNS 实例名（待办）。** 现在硬编码 `pibuddy`，两个 sidecar 同时广播会让
-   设备任选一个；需要唯一后缀。
+4. **WS 端点鉴权 —— 已实现。** 该端点监听整个局域网且能执行
+   `herdr agent send-keys`，所以任何主机都能往用户的 agent pane 注入按键。现在设备
+   走 `/<链接码>`，其他一律在升级前被拒；链接码只生成一次，存放在
+   `~/.pi-buddy/token`（权限 600），由用户在配网页输入，而 `pibud_token` 会容忍
+   手机键盘带来的分隔符与大小写差异。握手被拒三次后会重开配网门户，而「连不上」
+   则不会——不能仅仅因为 Mac 睡着了就冒出个开放 AP。
+5. **mDNS 实例名** —— 注册名现在是 `pibuddy-<端口>-<主机哈希>`，第二个 sidecar 不再
+   抢注同名，也就不会把设备抢走。
 6. **中断键序列** —— OK 长按发 Escape（`send-keys <pane> esc`）；已验证。
 7. **假设：** pi 的"批准"是通用远程输入（无结构化权限弹窗）——已确认。
 
