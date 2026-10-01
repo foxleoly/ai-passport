@@ -45,5 +45,6 @@ CONFIG_ESP_WIFI_ENABLED=y
 CONFIG_ESP_WIFI_SOFTAP_SUPPORT=y
 # esp_websocket_client（esp-protocols）需要 tcp_transport 的 WS transport 才编译源。
 CONFIG_WS_TRANSPORT=y
-# wifi_prov SoftAP 方案用 protocomm HTTP；SECURITY_0 = 明文（仅本地首次配网）。
-CONFIG_ESP_PROTOCOMM_SUPPORT_SECURITY_VERSION_0=y
+# Pi Buddy owns the provisioning credentials in its own NVS namespace, so the
+# Wi-Fi driver's own NVS persistence is off: one source of truth instead of two.
+CONFIG_ESP_WIFI_NVS_ENABLED=n
