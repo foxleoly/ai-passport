@@ -34,7 +34,13 @@ skill 的 `SKILL.md` 定义了精确流程：检查项目、准备中英文标�
 - **固件**：固定使用单个合并镜像 `build/FoloToy-AI-Passport-full.bin`，
   且必须通过 `./tools/validate.sh --firmware` 与[当前配置的固件布局](../engineering/firmware-layout.zh_CN.md)。
   不得用 `idf.py build` 生成的应用单镜像替代。
-- **封面**：一张代表产品的 JPEG / PNG / WebP 图（≤ 10 MiB）。
+- **封面**：一张代表产品的 JPEG / PNG / WebP 图（≤ 10 MiB）。发布助手包里另外记录了
+  一个串口截屏协议（`FAP_SCREENSHOT_V1`：在串口上写入同名字符串，设备回
+  `FAP_SCREENSHOT_V1 <w> <h> <encoding> <bytes>` 头 + RGB565LE 或 PNG 负载），并写明
+  "通过本 skill 发布的固件必须实现它"，且 `validate` / `submit` 要配套的 capture 收据。
+  但它的 CLI 目前把 `--screen-capture` 当作**可选**，所以没有收据也能提交通过——只是那时
+  封面只能是用绘制的示意图，而非真实画面。每次发布前重新确认当前要求，再决定本应用是否
+  实现该协议。
 - **源码**：固件仓库的公开 HTTPS Git 项目页——GitHub、Gitee、GitLab、Codeberg 或其它公开可达的 HTTPS Git 仓库页。fork 所有者从其 fork 的来源页发布，从 `git remote -v` 解析。
 
 ## 安全与边界

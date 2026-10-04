@@ -31,7 +31,15 @@ The skill's `SKILL.md` defines the exact workflow: inspect the project, prepare 
   `./tools/validate.sh --firmware`, including the
   [configured firmware layout](../engineering/firmware-layout.md).
   Never substitute the app-only `.bin` produced by `idf.py build`.
-- **Cover**: a representative JPEG / PNG / WebP image (<= 10 MiB).
+- **Cover**: a representative JPEG / PNG / WebP image (<= 10 MiB). The publisher
+  bundle also documents a serial screen-capture protocol (`FAP_SCREENSHOT_V1`, a
+  `FAP_SCREENSHOT_V1 <w> <h> <encoding> <bytes>` header plus an RGB565LE or PNG
+  payload, requested with the same line over the serial port) and says firmware
+  published through the skill must implement it, with `validate` / `submit` wanting a
+  matching capture receipt. Its CLI currently treats `--screen-capture` as optional,
+  so a submission can pass without one — but a cover is then a drawn illustration,
+  not a real screen. Check the current requirement before a release and decide
+  whether this app implements the protocol.
 - **Source**: the public HTTPS Git page for the firmware repository — GitHub, Gitee, GitLab, Codeberg, or another publicly reachable HTTPS Git repository page. A fork owner publishes from their fork's source page, resolved from `git remote -v`.
 
 ## Safety and boundaries

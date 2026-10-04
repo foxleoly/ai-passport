@@ -14,12 +14,13 @@
 多少 token；一个按键就能停掉当前运行。
 
 - **范围内：** 固件（240×320 LVGL 看板 + 换行 JSON 协议 + 状态机 + 视图 + 3 键）
-  与电脑侧 **sidecar**（Go CLI），后者观察 pi 会话并驱动 herdr。
+  与电脑侧的 **sidecar**（Go CLI）加一个 **pi 扩展**：扩展发布会话状态、并通过 pi 自身的
+  扩展 API 执行设备动作。
 - **链路：** USB-Serial-JTAG（有线）与 Wi-Fi + WebSocket + mDNS 发现（免线）——
   见 §4.1。BLE 已移除，见 §4.1。
 - **范围外 / 非目标：** 不是安全令牌或 passkey 凭据载体；不是电子宠物（吉祥物是
   16px 状态头像，不是 132px 养成舞台）；不用 NFC（NTAG213 无 MCU API）；
-  "批准" = pi 的**通用远程输入**（`herdr agent prompt` / `send-keys`），
+  "批准" = pi 的**通用远程输入**（经 pi 扩展发一条用户消息），
   非结构化权限弹窗。
 
 ## 2. 屏幕设计（把 240×320 用满）
@@ -28,20 +29,21 @@
 
 | 区域 | 高度 | 内容 |
 | --- | --- | --- |
-| 状态条 | ~22px | 模型（左）· 状态 chip + 16px 吉祥物（中）· 电量（右上，仓库不变式） |
+| 状态条 | ~22px | 模型（左）· 时钟 · 活动圆点 · WiFi · 电量（右） |
 | 主区 | ~256px | 视图内容 |
 | 动作条 | ~22px | 按键提示，随上下文变化 |
 
 ### 2.1 视图
 
 已实现，由切视图手势循环：
-1. **HOME / 总览**（默认落地页）——pi.dev 风格：暖羊皮纸、等宽字体、三色马赛克
-   logo、全局状态摘要。
-2. **LIVE**（默认看板）——状态条 + ~15 行实时活动流 + 焦点条（当前工具全文 +
-   token/成本）+ 动作条。
-3. **STATS** —— 模型 / token / 成本 / 运行时长 / 子代理 / 错误数 / 最近工具 /
-   分支 / 状态。
-4. **MENU** —— 亮度 / 跟随实时 / 声音 / 时钟 / 记录 / 恢复出厂。
+1. **HOME / 总览**（默认落地页）——pi.dev 风格：暖羊皮纸、等宽字体、40px 三色
+   马赛克 logo、一条运行中的三色进度条，以及 1d / 7d / 30d token 累计、子代理
+   数与链路状态。
+2. **LIVE**（默认看板）——状态条 + 实时活动流 + 焦点条（当前工具 + token/成本）+
+   动作条。
+3. **STATS** —— token 拆分（total / input / output / cache，各带占比）再加成本 /
+   子代理 / 工具 / 分支。子代理数显示 `--`：pi 的扩展 API 不提供子代理数据。
+4. **MENU** —— 亮度（显示当前百分比）+ 恢复出厂。
 
 计划中但未实现（P4，延后）：**PAIRING** 弹层（六位配对码——BLE 移除后已无意义）
 与 **APPROVAL** 弹层（WAITING 横幅 + 待批提示 + ALLOW/DENY），二者会自动出现而非
@@ -54,7 +56,6 @@
 | `✓ / ✗ bash` | `toolResult.isError` | 绿 / 红 |
 | `thinking …` | `thinking` 块 | 黄 |
 | `[model] agnes→…` | `model_change` | 青 |
-| `scout-1 running` | herdr agent 快照 | 蓝 |
 
 自动跟随最新；回滚缓冲约 48 行（无 PSRAM → 受 RAM 预算约束）。
 
@@ -65,8 +66,9 @@ ink        #252F3D  muted #5C5752
 logo       coral #F09082 / steel #4D9ABF / amber #F1BE58 (accent #6A9FCC)
 type       monospace
 ```
-HOME = 暖羊皮纸 + 等宽 + 三色马赛克（按官方 SVG 路径 1:1 重绘）。深色页是否点缀
-三色仍待定（Q2，§9）。
+HOME = 暖羊皮纸 + 等宽 + 三色马赛克，按官方 SVG 路径
+（https://pi.dev/logo-auto.svg）1:1 重绘成 4×4 格子上的 5 个矩形——该文件所有边都是
+水平/垂直，无需位图。深色页在右上角放同一枚 24px 标志（Q2，已定）。
 
 ## 3. 三键映射（已定）
 
@@ -100,7 +102,8 @@ BLE 与 Wi-Fi 根本不能共存——NimBLE 占 ~73 KB 堆，在 320 KB SRAM �
 - 数据通道：`pibud_usbc`（Path A）与 `pibud_ws`（Path C）。两者喂同一个换行 JSON
   解析器和同一个应用事件队列，所以 UI 与链路无关。
 - 可跑 host 测试的纯逻辑：`pibud_protocol*`（换行 JSON）、`pibud_state_reduce`
-  （状态机）、`pibud_text_layout`、`pibud_line`（有界收包）、`pibud_i4`。
+  （状态机）、`pibud_text_layout`、`pibud_line`（有界收包）、`pibud_i4`、
+  `pibud_format`（token 单位 K/M/B/T 与 HH:MM 时钟）。
 - `pibud_ui_render(snapshot)` 在 `bsp_lvgl_lock()` 保护下调用。
 - `pibud_ws`：自建 SoftAP 配网门户（`esp_http_server`，SSID `Pi-Buddy-Setup`）
   → 凭据存入自建 NVS 命名空间 → STA → mDNS 浏览 → `esp_websocket_client` →
@@ -109,20 +112,31 @@ BLE 与 Wi-Fi 根本不能共存——NimBLE 占 ~73 KB 堆，在 320 KB SRAM �
   （HTML 转义与网络选择列表）。
 - 仓库规则：从 `main` 拉分支；UI 完全重做（不复用 demo 测试菜单）。
 
-### 4.3 sidecar（电脑侧，Go CLI）
-```text
-read: tail $PI_SESSION_FILE (JSONL)   -> tool_use/toolResult/thinking/model_change/usage
-      herdr api snapshot              -> agent lifecycle + subagents
-push: heartbeat JSON -> WS text frame (Path C) or USB line (Path A), every 2s
-recv: device act JSON -> herdr agent send-keys / prompt
-```
-Path C 下 sidecar 是 WebSocket **服务端**（`:51820`），并通过 macOS 的
-`dns-sd -R` 广播 `_pibuddy._tcp`；由于 `dns-sd` 没有守护模式，sidecar 会守护它并
-在退出后重新注册。不带 `Origin` 头的升级请求被接受，来自浏览器的被拒绝。控制走
-`herdr agent send-keys|prompt`；不要直接说 `herdr.sock` 的原始协议。
+### 4.3 电脑侧（Go sidecar + pi 扩展）
 
-> sidecar 必须显式带 `--target`（例如 `--target w4:p1`）。不带时动作会打到当前
-> **聚焦**的 herdr pane，而那可能正是跑 sidecar 的这个会话。
+电脑侧是两块：Go **sidecar** 与 **pi 扩展**。两者通过 `~/.pi-buddy` 通信，该目录由扩展以
+0700 创建——能写进去的进程就能停掉你的 agent。
+
+```text
+sidecar: read  ~/.pi-buddy/session-<pid>.json  <- 扩展每秒发布一次
+         tail  the session JSONL               -> tool_use/toolResult/thinking/model_change/usage
+         push  heartbeat JSON -> WS frame (Path C) or USB line (Path A), every 2s
+         write ~/.pi-buddy/act.json            -> 扩展执行该动作
+         read  ~/.pi-buddy/act-result.json     <- 扩展回写结果
+```
+
+扩展按 pi 进程各写一份状态文件，所以多个 agent 可以同时跑；sidecar 跟随**最近更新**的那份
+（`--pi-pid` 可钉住某一个）。超过 10 秒没被重写的状态视为离线，pi 意外退出就是这样被发现的。
+
+Path C 下 sidecar 是 WebSocket **服务端**（`:51820`），并用纯 Go 广播 `_pibuddy._tcp`，
+发现不再依赖平台专有工具（以前是调 macOS 的 `dns-sd`，Linux 上没有）。不带 `Origin` 头的
+升级请求被接受，来自浏览器的被拒绝。
+
+不再有 `--target`：扩展知道自己的会话，动作不可能打到别的 pane。`interrupt` 调 pi 自己的
+`abort()`；approve/deny 把配置的文本作为用户消息发出。
+
+herdr 是**可选的**：pi 把子代理放在 herdr pane 里，所以装了 herdr 时 sidecar 会用它取子代理数。
+其他部分都不依赖它——启动时检测一次，没有就显示未知。
 
 该端点不再对局域网开放：设备必须走 `/<链接码>`，而链接码是 sidecar 首次运行时
 生成到 `~/.pi-buddy/token` 的 12 位十六进制码（用 `--show-token` 再次打印）。其他
@@ -143,10 +157,25 @@ iPhone 共享，而那个码本来就得在手机上输入）。安装方式：�
 ```json
 {"cmd":"hb","model":"agnes-3.0-flash","state":"running",
  "tool":"read","arg":"main/buddy_state.c","result_ok":true,
- "sub_total":4,"sub_working":1,"tokens":18432,"cost":0.06}
+ "sub_available":false,"sub_total":0,"sub_working":0,
+ "tokens":18432,"in_tokens":12000,
+ "out_tokens":6000,"cache_tokens":432,"tokens_7d":515000000,
+ "tokens_30d":629000000,"cost":0.06}
+{"cmd":"time","epoch":1790870019,"tz":28800}
 {"cmd":"prompt","text":"...","waiting":true}
 // device -> {"cmd":"act","kind":"approve"|"deny"|"interrupt"}
 ```
+- heartbeat 的 `tokens` 总量是**今天（本地日）跨所有 session** 的累计，按每条记录
+  的 `timestamp` 过滤；`tokens_7d` / `tokens_30d` 是同样的窗口累加放宽到 7 天 / 30
+  天，故满足 今天 ≤ 7d ≤ 30d。sidecar 每条 heartbeat 都会附一条 `time` 给状态条
+  时钟。
+- token 用 `pibud_format_tokens` 渲染（K/M/B/T，最多一位小数）。
+- `sub_available` 告诉设备子代理数是否有意义。没有 herdr 时它才是 false：该计数来自
+  herdr，而 pi 的扩展 API 没有等价数据。设备把未知的计数显示为 STATS 的 `--` 与 HOME
+  的空行，而不是把 0 当成真实读数。
+- 设备对每次动作做反馈：动作条在 ~2.5s 内先显示 `sending…`，再显示
+  `sent to your mac`（绿）或 `not sent - check the link`（红），由链路层在 USB/WS
+  写入后注入的 `PIBUD_EVENT_ACT_RESULT` 驱动。
 - 有界缓冲：关键字段（id/tool）超限则整条拒绝；展示字段安全截断（buddy 有界缓冲
   策略）。
 - 30 秒无快照 → 状态机判定过期、清空提示、显示离线/睡眠（buddy 超时逻辑）。
@@ -155,10 +184,15 @@ iPhone 共享，而那个码本来就得在手机上输入）。安装方式：�
 - `$PI_SESSION_FILE`：实时 JSONL。字段：`message.role/content(api,provider,model,
   usage,stopReason)`、`tool_use`、`toolResult(toolName,isError)`、`thinking`、
   `model_change`。
-- `herdr api snapshot`：实时 agent 快照（状态、子代理、JSONL 路径）。
-- `herdr agent send-keys` / `herdr agent prompt`：控制注入点。
+- `~/.pi-buddy/session-<pid>.json`（pi 扩展写入）：agent 状态、会话 JSONL 路径、cwd 与标题。
+  取代了 herdr 快照。
+- `~/.pi-buddy/act.json` / `act-result.json`：通往扩展的动作通道。
 
 ## 7. 阶段
+
+> P1–P4 各行记录的是当时各阶段的交付内容。当前架构看 §4.3：P1/P3 里提到 herdr 的
+> 措辞说的是那个阶段，不是现在。
+
 | 阶段 | 交付物 | 验收 | 状态 |
 | --- | --- | --- | --- |
 | **P1** | sidecar：读 JSONL + `herdr api snapshot` → heartbeat JSON | host 测试 + 真实会话打印 | 完成 |
@@ -197,7 +231,7 @@ iPhone 共享，而那个码本来就得在手机上输入）。安装方式：�
 ## 8. 测试矩阵
 - **host 测试：** 协议解析、状态机 reduce、文本换行/裁剪、活动流行格式化、
   urlencoded 表单解码、配网页 HTML 转义（全为纯逻辑，与 ESP-IDF/LVGL 解耦）；
-  sidecar 的 JSONL 解析 + herdr 调用封装。
+  sidecar 的 JSONL 解析、发布会话状态与动作通道。
 - **真机测试：** 240×320 各视图/各行/超长字符串渲染、无看门狗 soak、绑定、
   OK 长按中断。
 - **交付四字段：** 分开报告 `Build / Host tests / Device tests / Unverified`；
@@ -205,7 +239,7 @@ iPhone 共享，而那个码本来就得在手机上输入）。安装方式：�
 
 ## 9. 待办项 / 假设
 1. **Q1 默认落地页 = HOME** —— 已确认。
-2. **Q2 深色页是否点缀 pi 三色** —— 待定。
+2. **Q2 深色页带 pi 标志** —— 已定：同一枚马赛克，24px，置于右上角。
 3. **配网 UX —— 已实现。** `wifi_prov_mgr` 的 SoftAP 方案不带网页表单，配 Wi-Fi
    得用电脑上的 `esp_prov.py`，而连上 `Pi-Buddy-Setup` 会让那台电脑断网。现在设备
    自带 captive portal：扫描结果填充网络选择列表，另留一个文本框供隐藏网络使用；
@@ -214,16 +248,23 @@ iPhone 共享，而那个码本来就得在手机上输入）。安装方式：�
    连不上，约 30 秒后门户会重开，让输错密码不至于把用户锁在门外；门户开着期间
    STA 停止重试，因为扫描中的 STA 会与 SoftAP 争射频。密码框带 Show 切换开关——
    这个码只从手机键盘输入一次，而一次笔误就要付出一整轮重试的代价。
-4. **WS 端点鉴权 —— 已实现。** 该端点监听整个局域网且能执行
-   `herdr agent send-keys`，所以任何主机都能往用户的 agent pane 注入按键。现在设备
+4. **WS 端点鉴权 —— 已实现。** 该端点监听整个局域网且能执行设备动作，
+   所以任何主机都能停掉用户的 agent。现在设备
    走 `/<链接码>`，其他一律在升级前被拒；链接码只生成一次，存放在
    `~/.pi-buddy/token`（权限 600），由用户在配网页输入，而 `pibud_token` 会容忍
    手机键盘带来的分隔符与大小写差异。握手被拒三次后会重开配网门户，而「连不上」
    则不会——不能仅仅因为 Mac 睡着了就冒出个开放 AP。
-5. **mDNS 实例名** —— 注册名现在是 `pibuddy-<端口>-<主机哈希>`，第二个 sidecar 不再
-   抢注同名，也就不会把设备抢走。
-6. **中断键序列** —— OK 长按发 Escape（`send-keys <pane> esc`）；已验证。
+5. **mDNS 实例名** —— 注册名是 `pibuddy-<端口>-<主机哈希>`，第二个 sidecar 不再
+   抢注同名，也就不会把设备抢走。广播改用 Go 的 mDNS 库，不再用 `dns-sd`，所以
+   Linux 与 Windows 也能用。
+6. **中断** —— OK 长按调 pi 扩展的 `abort()`；已上机验证。
 7. **假设：** pi 的"批准"是通用远程输入（无结构化权限弹窗）——已确认。
+8. **子代理数 —— 可选，来自 herdr。** pi 把子代理放在 herdr pane 里，所以装了 herdr 时
+   sidecar 仍会向它取该计数；pi 的扩展 API 没有等价数据。启动时检测一次，没有 herdr 就显示
+   未知，因此没有任何东西依赖它。
+9. **动作通道就是一个普通目录。** `~/.pi-buddy` 下放着 `act.json` 与
+   `session-<pid>.json`，因此任何能写该目录的本地进程都能停掉 agent。目录由扩展以
+   0700 创建；sidecar 不会去收紧一个已存在的目录。
 
 ## 10. 验证与交付门槛
 - 迭代用 `./tools/validate.sh --static`；交付用 `./tools/validate.sh`（需已激活
