@@ -10,7 +10,7 @@ import (
 func TestMarshalLinkStatusShape(t *testing.T) {
 	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
 
-	data, err := marshalLinkStatus(true, "192.168.145.74:58501", 4242, now)
+	data, err := marshalLinkStatus(true, "192.168.1.50:58501", 4242, now)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
@@ -19,7 +19,7 @@ func TestMarshalLinkStatusShape(t *testing.T) {
 	if err := json.Unmarshal(data, &got); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if !got.Connected || got.Device != "192.168.145.74:58501" || got.PID != 4242 {
+	if !got.Connected || got.Device != "192.168.1.50:58501" || got.PID != 4242 {
 		t.Fatalf("unexpected status %+v", got)
 	}
 	if got.Updated != "2026-10-01T12:00:00Z" {
@@ -75,6 +75,7 @@ func TestLinkOpenTracking(t *testing.T) {
 
 	linkMu.Lock()
 	linkOpen = 0
+	linkDevice = ""
 	linkMu.Unlock()
 
 	noteLinkOpened("a")
@@ -86,7 +87,7 @@ func TestLinkOpenTracking(t *testing.T) {
 	want := []state{
 		{true, "a"},
 		{true, "b"},
-		{true, ""}, // one connection is still open
+		{true, "b"}, // the surviving connection keeps its address
 		{false, ""},
 		{false, ""},
 	}

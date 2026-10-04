@@ -65,15 +65,18 @@ var publish = publishLinkStatus
 // Connections can overlap, so the published state tracks how many are open. A
 // closing connection that just cleared the flag could otherwise overwrite the
 // state of one that has already replaced it, leaving the link reported offline
-// until the next event.
+// until the next event. The last-opened address rides along with the count so a
+// close that leaves another connection up does not blank the device field.
 var (
-	linkMu   sync.Mutex
-	linkOpen int
+	linkMu     sync.Mutex
+	linkOpen   int
+	linkDevice string
 )
 
 func noteLinkOpened(device string) {
 	linkMu.Lock()
 	linkOpen++
+	linkDevice = device
 	linkMu.Unlock()
 	publish(true, device)
 }
@@ -84,6 +87,13 @@ func noteLinkClosed() {
 		linkOpen--
 	}
 	remaining := linkOpen
+	device := linkDevice
 	linkMu.Unlock()
-	publish(remaining > 0, "")
+	if remaining > 0 {
+		// Another connection is still up: keep the address we last saw rather
+		// than reporting "linked" with no device.
+		publish(true, device)
+		return
+	}
+	publish(false, "")
 }

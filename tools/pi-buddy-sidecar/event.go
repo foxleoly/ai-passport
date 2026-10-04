@@ -1,82 +1,15 @@
 package main
 
-// Pure, host-testable logic for the pi-buddy sidecar: parse herdr snapshot
-// JSON and aggregate pi session JSONL records into a heartbeat. No I/O here.
+// Pure, host-testable logic for the pi-buddy sidecar: aggregate pi session
+// JSONL records into a heartbeat. No I/O here.
 
 import (
 	"encoding/json"
 	"fmt"
+	"time"
 )
 
-// AgentState is one entry in herdr's snapshot.agents.
-type AgentState struct {
-	Agent        string `json:"agent"`
-	AgentStatus  string `json:"agent_status"`
-	Cwd          string `json:"cwd"`
-	TerminalTitle string `json:"terminal_title"`
-	Focused      bool   `json:"focused"`
-	PaneID       string `json:"pane_id"`
-	AgentSession struct {
-		Value string `json:"value"`
-	} `json:"agent_session"`
-}
-
-// HerdrSnapshot mirrors the `herdr api snapshot` result.
-type HerdrSnapshot struct {
-	ID string `json:"id"`
-	Result struct {
-		Snapshot struct {
-			Agents          []AgentState `json:"agents"`
-			FocusedPaneID   string       `json:"focused_pane_id"`
-			FocusedWorkspaceID string    `json:"focused_workspace_id"`
-		} `json:"snapshot"`
-	} `json:"result"`
-}
-
-// Focus returns the agent matching the focused pane (or the first working one).
-func (s HerdrSnapshot) Focus() *AgentState {
-	snap := s.Result.Snapshot
-	for i := range snap.Agents {
-		if snap.Agents[i].Focused || snap.Agents[i].PaneID == snap.FocusedPaneID {
-			return &snap.Agents[i]
-		}
-	}
-	for i := range snap.Agents {
-		if snap.Agents[i].AgentStatus == "working" {
-			return &snap.Agents[i]
-		}
-	}
-	if len(snap.Agents) > 0 {
-		return &snap.Agents[0]
-	}
-	return nil
-}
-
-// AgentSummary counts herdr agents by status (for the sub-agent line).
-func (s HerdrSnapshot) AgentSummary() (total, working int) {
-	for _, a := range s.Result.Snapshot.Agents {
-		total++
-		if a.AgentStatus == "working" {
-			working++
-		}
-	}
-	return total, working
-}
-
-// NormalizeAgentState maps herdr's agent_status to the buddy state vocabulary.
-func NormalizeAgentState(status string) string {
-	switch status {
-	case "working":
-		return "running"
-	case "idle":
-		return "idle"
-	case "unknown", "":
-		return "offline"
-	default:
-		return status
-	}
-}
-
+// Events is the aggregate of the pi session JSONL records we have read.
 // Events is the aggregation of a pi session JSONL for one heartbeat.
 type Events struct {
 	Model        string
@@ -87,6 +20,11 @@ type Events struct {
 	LastResultOK *bool
 	Thinking     bool
 	Tokens       uint64
+	InTokens     uint64
+	OutTokens    uint64
+	CacheTokens  uint64
+	Tokens7d     uint64
+	Tokens30d    uint64
 	Cost         float64
 	Records      int
 }
@@ -94,49 +32,79 @@ type Events struct {
 // Aggregate folds parsed JSONL records (top-level objects) into Events.
 // rec is a decoded top-level record: {type, message?, modelId?, ...}.
 func Aggregate(recs []map[string]any) Events {
+	return aggregate(recs, time.Time{}, time.Time{})
+}
+
+// aggregate folds records into Events. A non-zero since restricts it to records
+// whose own timestamp falls in [since, until), so a session that spans midnight
+// contributes only the part that belongs to the window.
+func aggregate(recs []map[string]any, since, until time.Time) Events {
 	var e Events
 	for _, r := range recs {
-		e.Records++
-		switch r["type"].(string) {
-		case "model_change":
-			if mid, ok := r["modelId"].(string); ok {
-				e.Model = mid
-			}
-			if p, ok := r["provider"].(string); ok {
-				e.Provider = p
-			}
-		case "message":
-			m, _ := r["message"].(map[string]any)
-			if m == nil {
+		if !since.IsZero() {
+			ts := recordTime(r)
+			if ts.IsZero() || ts.Before(since) || (!until.IsZero() && !ts.Before(until)) {
 				continue
 			}
-			role, _ := m["role"].(string)
-			switch role {
-			case "assistant":
-				if s, ok := m["model"].(string); ok {
-					e.Model = s
-				}
-				if s, ok := m["provider"].(string); ok {
-					e.Provider = s
-				}
-				if s, ok := m["stopReason"].(string); ok {
-					e.StopReason = s
-				}
-				e.foldUsage(m)
-				e.foldBlocks(m)
-			case "toolResult":
-				eok := false
-				if err, ok := m["isError"].(bool); ok {
-					eok = !err
-				}
-				if nm, ok := m["toolName"].(string); ok && nm != "" {
-					e.LastTool = nm
-				}
-				e.LastResultOK = &eok
-			}
 		}
+		e.foldRecord(r)
 	}
 	return e
+}
+
+// recordTime parses a record's ISO-8601 timestamp (zero when absent or invalid).
+func recordTime(r map[string]any) time.Time {
+	s, _ := r["timestamp"].(string)
+	if s == "" {
+		return time.Time{}
+	}
+	t, err := time.Parse(time.RFC3339Nano, s)
+	if err != nil {
+		return time.Time{}
+	}
+	return t
+}
+
+func (e *Events) foldRecord(r map[string]any) {
+	e.Records++
+	switch r["type"].(string) {
+	case "model_change":
+		if mid, ok := r["modelId"].(string); ok {
+			e.Model = mid
+		}
+		if p, ok := r["provider"].(string); ok {
+			e.Provider = p
+		}
+	case "message":
+		m, _ := r["message"].(map[string]any)
+		if m == nil {
+			return
+		}
+		role, _ := m["role"].(string)
+		switch role {
+		case "assistant":
+			if s, ok := m["model"].(string); ok {
+				e.Model = s
+			}
+			if s, ok := m["provider"].(string); ok {
+				e.Provider = s
+			}
+			if s, ok := m["stopReason"].(string); ok {
+				e.StopReason = s
+			}
+			e.foldUsage(m)
+			e.foldBlocks(m)
+		case "toolResult":
+			eok := false
+			if err, ok := m["isError"].(bool); ok {
+				eok = !err
+			}
+			if nm, ok := m["toolName"].(string); ok && nm != "" {
+				e.LastTool = nm
+			}
+			e.LastResultOK = &eok
+		}
+	}
 }
 
 func (e *Events) foldUsage(m map[string]any) {
@@ -146,6 +114,19 @@ func (e *Events) foldUsage(m map[string]any) {
 	}
 	if n, ok := toUint(u["totalTokens"]); ok {
 		e.Tokens += n
+	}
+	if n, ok := toUint(u["input"]); ok {
+		e.InTokens += n
+	}
+	if n, ok := toUint(u["output"]); ok {
+		e.OutTokens += n
+	}
+	// The device shows a single "cache" bucket, so read and write fold together.
+	if n, ok := toUint(u["cacheRead"]); ok {
+		e.CacheTokens += n
+	}
+	if n, ok := toUint(u["cacheWrite"]); ok {
+		e.CacheTokens += n
 	}
 	c, _ := u["cost"].(map[string]any)
 	if c != nil {
@@ -223,49 +204,59 @@ func toFloat(v any) (float64, bool) {
 
 // Heartbeat is the pi-version payload pushed to the device over NUS RX.
 type Heartbeat struct {
-	Cmd        string `json:"cmd"`
-	Model      string `json:"model"`
-	Provider   string `json:"provider,omitempty"`
-	State      string `json:"state"`
-	Cwd        string `json:"cwd,omitempty"`
-	Title      string `json:"title,omitempty"`
-	Tool       string `json:"tool,omitempty"`
-	Arg        string `json:"arg,omitempty"`
-	ResultOK   *bool  `json:"result_ok,omitempty"`
-	Thinking   bool   `json:"thinking,omitempty"`
-	SubTotal   int    `json:"sub_total,omitempty"`
-	SubWorking int    `json:"sub_working,omitempty"`
-	Tokens     uint64 `json:"tokens"`
-	Cost       float64 `json:"cost"`
-	StopReason string `json:"stop_reason,omitempty"`
+	Cmd          string  `json:"cmd"`
+	Model        string  `json:"model"`
+	Provider     string  `json:"provider,omitempty"`
+	State        string  `json:"state"`
+	Cwd          string  `json:"cwd,omitempty"`
+	Title        string  `json:"title,omitempty"`
+	Tool         string  `json:"tool,omitempty"`
+	Arg          string  `json:"arg,omitempty"`
+	ResultOK     *bool   `json:"result_ok,omitempty"`
+	Thinking     bool    `json:"thinking,omitempty"`
+	SubAvailable bool    `json:"sub_available"`
+	SubTotal     int     `json:"sub_total,omitempty"`
+	SubWorking   int     `json:"sub_working,omitempty"`
+	Tokens       uint64  `json:"tokens"`
+	InTokens     uint64  `json:"in_tokens,omitempty"`
+	OutTokens    uint64  `json:"out_tokens,omitempty"`
+	CacheTokens  uint64  `json:"cache_tokens,omitempty"`
+	Tokens7d     uint64  `json:"tokens_7d,omitempty"`
+	Tokens30d    uint64  `json:"tokens_30d,omitempty"`
+	Cost         float64 `json:"cost"`
+	StopReason   string  `json:"stop_reason,omitempty"`
 }
 
-// BuildHeartbeat composes a heartbeat from herdr focus + JSONL events.
-func BuildHeartbeat(focus *AgentState, ev Events, subTotal, subWorking int) Heartbeat {
-	state := "offline"
-	cwd, title, jsonl := "", "", ""
-	if focus != nil {
-		state = NormalizeAgentState(focus.AgentStatus)
-		cwd = focus.Cwd
-		title = focus.TerminalTitle
-		jsonl = focus.AgentSession.Value
-		_ = jsonl
+// BuildHeartbeat composes a heartbeat from the published session state, the
+// JSONL events, and the sub-agent count — which is only known when herdr is
+// installed.
+func BuildHeartbeat(session *SessionState, ev Events, subs SubagentCount) Heartbeat {
+	cwd, title := "", ""
+	if session != nil {
+		cwd = session.Cwd
+		title = session.Title
 	}
 	hb := Heartbeat{
-		Cmd:        "hb",
-		Model:      ev.Model,
-		Provider:   ev.Provider,
-		State:      state,
-		Cwd:        cwd,
-		Title:      title,
-		Tool:       ev.LastTool,
-		Arg:        ev.LastArg,
-		Thinking:   ev.Thinking,
-		SubTotal:   subTotal,
-		SubWorking: subWorking,
-		Tokens:     ev.Tokens,
-		Cost:       ev.Cost,
-		StopReason: ev.StopReason,
+		Cmd:          "hb",
+		Model:        ev.Model,
+		Provider:     ev.Provider,
+		State:        session.State(),
+		Cwd:          cwd,
+		Title:        title,
+		Tool:         ev.LastTool,
+		Arg:          ev.LastArg,
+		Thinking:     ev.Thinking,
+		SubAvailable: subs.Available,
+		SubTotal:     subs.Total,
+		SubWorking:   subs.Working,
+		Tokens:       ev.Tokens,
+		InTokens:     ev.InTokens,
+		OutTokens:    ev.OutTokens,
+		CacheTokens:  ev.CacheTokens,
+		Tokens7d:     ev.Tokens7d,
+		Tokens30d:    ev.Tokens30d,
+		Cost:         ev.Cost,
+		StopReason:   ev.StopReason,
 	}
 	if ev.LastResultOK != nil {
 		hb.ResultOK = ev.LastResultOK

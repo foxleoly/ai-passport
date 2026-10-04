@@ -11,14 +11,16 @@ package main
 import (
 	"fmt"
 	"hash/fnv"
+	"io"
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/grandcat/zeroconf"
 )
 
 // mDNS service the device browses for. The registration type needs the
@@ -28,6 +30,7 @@ import (
 const (
 	wsMdnsService = "_pibuddy"
 	wsMdnsRegType = wsMdnsService + "._tcp"
+	wsMdnsDomain  = "local."
 )
 
 // mdnsInstance names this registration. 'dns-sd' instance names are unique per
@@ -51,11 +54,11 @@ func hostname() string {
 
 // runWS serves the WebSocket tether on listen (e.g. ":51820") and advertises
 // itself over mDNS so the device can find us without a hard-coded IP.
-func runWS(listen, target, approveText, denyText, herdrBin, tokenFlag string) {
+func runWS(listen, approveText, denyText, tokenFlag string, piPid int, herdrBin string) {
 	openBleLog()
 
 	// Without a link code the endpoint is reachable by every host on the LAN, and
-	// connecting to it runs herdr input, so a code is always required.
+	// connecting to it runs the device's acts, so a code is always required.
 	tokenPath, err := defaultTokenPath()
 	if err != nil {
 		bleLogf("WS: cannot locate the link code file: %v\n", err)
@@ -74,20 +77,28 @@ func runWS(listen, target, approveText, denyText, herdrBin, tokenFlag string) {
 		bleLogf("WS: bad listen addr %q: %v\n", listen, err)
 		return
 	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		bleLogf("WS: bad port %q: %v\n", portStr, err)
+		return
+	}
 
-	// Advertise mDNS _pibuddy._tcp.local (instance "pibuddy") on this port.
-	// macOS's dns-sd has no daemon mode and is not supervised; if it goes away
-	// the advertisement goes with it and the device silently loses discovery.
-	// Keep re-registering for as long as we serve.
-	go superviseMDNS(portStr)
+	// Advertise _pibuddy._tcp.local so the device can find us without a
+	// hard-coded IP. This used to shell out to macOS's `dns-sd`, which does not
+	// exist on Linux; the library keeps the registration alive on every platform
+	// and needs no supervising.
+	mdns := advertiseMDNS(port)
+	if mdns != nil {
+		defer mdns.Shutdown()
+	}
 
 	upgrader := websocket.Upgrader{
 		ReadBufferSize:  1024,
 		WriteBufferSize: 1024,
 		// The device is a raw WebSocket client and sends no Origin header, so
 		// allow exactly that case. Rejecting Origin-bearing requests stops a web
-		// page the user visits (or a DNS-rebinding probe) from driving herdr
-		// through this endpoint.
+		// page the user visits (or a DNS-rebinding probe) from driving the
+		// device's acts through this endpoint.
 		CheckOrigin: func(r *http.Request) bool {
 			return r.Header.Get("Origin") == ""
 		},
@@ -108,7 +119,14 @@ func runWS(listen, target, approveText, denyText, herdrBin, tokenFlag string) {
 		}
 		bleLogf("WS: device connected %s\n", r.RemoteAddr)
 		noteLinkOpened(r.RemoteAddr)
-		serveWS(conn, target, approveText, denyText, herdrBin)
+		// A reconnecting device opens a new socket while the old one is still
+		// open here (nothing notices the peer left until a write fails), so
+		// supersede it now instead of letting sessions accumulate.
+		if old := wsLive.replace(conn); old != nil {
+			bleLogf("WS: superseding the previous device connection\n")
+			_ = old.Close()
+		}
+		serveWS(conn, approveText, denyText, piPid, herdrBin)
 	})
 
 	srv := &http.Server{Addr: listen, Handler: mux}
@@ -120,56 +138,112 @@ func runWS(listen, target, approveText, denyText, herdrBin, tokenFlag string) {
 	}
 }
 
-// superviseMDNS keeps a `dns-sd -R` registration alive for our port. The device
-// finds us only while the service is registered, so a single unsupervised exec
-// leaves the link silently broken as soon as dns-sd stops.
-func superviseMDNS(port string) {
-	const restartDelay = 2 * time.Second
-	instance := mdnsInstance(port)
-	for {
-		cmd := exec.Command("dns-sd", "-R", instance, wsMdnsRegType, "local", port)
-		if err := cmd.Start(); err != nil {
-			bleLogf("WS: mDNS advertise failed: %v (device must reach us some other way)\n", err)
-			time.Sleep(restartDelay)
-			continue
-		}
-		bleLogf("WS: advertising mDNS %s.local (instance %s) on port %s (pid %d)\n",
-			wsMdnsRegType, instance, port, cmd.Process.Pid)
-		werr := cmd.Wait()
-		bleLogf("WS: mDNS registration exited: %v; re-registering in %s\n", werr, restartDelay)
-		time.Sleep(restartDelay)
+// advertiseMDNS registers the mDNS service the device browses for. The
+// registration is kept alive by the library for as long as the server is not
+// shut down, so there is no supervisor loop to keep running.
+func advertiseMDNS(port int) *zeroconf.Server {
+	instance := mdnsInstance(strconv.Itoa(port))
+	server, err := zeroconf.Register(instance, wsMdnsService, wsMdnsDomain, port, []string{"pi-buddy=1"}, nil)
+	if err != nil {
+		bleLogf("WS: mDNS advertise failed: %v (the device must reach us some other way)\n", err)
+		return nil
 	}
+	bleLogf("WS: advertising mDNS %s.local (instance %s) on port %d\n", wsMdnsRegType, instance, port)
+	return server
 }
 
+// wsSessions enforces one live device connection. A reconnect (reboot, Wi-Fi
+// blip) arrives before this side notices the previous peer is gone — nothing
+// here fails until a heartbeat write does — so without this the sidecar holds
+// several sessions at once.
+type wsSessions struct {
+	mu   sync.Mutex
+	conn io.Closer
+}
+
+// replace installs c as the live connection and returns the connection it
+// superseded, if any, for the caller to close.
+func (s *wsSessions) replace(c io.Closer) io.Closer {
+	s.mu.Lock()
+	old := s.conn
+	s.conn = c
+	s.mu.Unlock()
+	return old
+}
+
+// release drops c if it is still the live connection, so a superseded socket
+// unwinding later cannot clear its replacement.
+func (s *wsSessions) release(c io.Closer) {
+	s.mu.Lock()
+	if s.conn == c {
+		s.conn = nil
+	}
+	s.mu.Unlock()
+}
+
+// wsLive is the one live device connection for this sidecar process.
+var wsLive wsSessions
+
+// Keepalive: the link is silent between heartbeats and acts, so a peer that
+// vanishes without a FIN (Wi-Fi drop, NAT rebind) would keep the session open
+// until a write happened to fail. We ping every wsPingEvery and reap the session
+// once no pong has pushed the read deadline within wsPongWait.
+const (
+	wsPongWait  = 30 * time.Second
+	wsPingEvery = 10 * time.Second
+	wsWriteWait = 10 * time.Second
+)
+
 // serveWS pushes heartbeats and reads acts for one device connection.
-func serveWS(conn *websocket.Conn, target, approveText, denyText, herdrBin string) {
+func serveWS(conn *websocket.Conn, approveText, denyText string, piPid int, herdrBin string) {
 	defer conn.Close()
 	defer noteLinkClosed()
+	defer wsLive.release(conn)
 
-	// Reader: act JSON frames from the device (device->Mac).
+	_ = conn.SetReadDeadline(time.Now().Add(wsPongWait))
+	conn.SetPongHandler(func(string) error {
+		return conn.SetReadDeadline(time.Now().Add(wsPongWait))
+	})
+
+	// Reader: act JSON frames from the device (device->Mac). Gorilla answers the
+	// device's own keepalive PINGs and drives the pong handler from in here.
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		for {
 			_, raw, err := conn.ReadMessage()
 			if err != nil {
 				bleLogf("WS: read: %v\n", err)
 				return
 			}
-			handleDeviceLine(string(raw), target, approveText, denyText, herdrBin)
+			handleDeviceLine(string(raw), approveText, denyText)
 		}
 	}()
 
-	// Writer: heartbeat JSON to the device (Mac->device) every 2s.
-	tick := time.NewTicker(2 * time.Second)
-	defer tick.Stop()
-	for range tick.C {
-		hb := makeHeartbeat(herdrBin, 50)
-		if err := conn.WriteMessage(websocket.TextMessage, hb); err != nil {
-			bleLogf("WS: heartbeat write: %v\n", err)
+	heartbeat := time.NewTicker(2 * time.Second)
+	defer heartbeat.Stop()
+	ping := time.NewTicker(wsPingEvery)
+	defer ping.Stop()
+
+	for {
+		select {
+		case <-done: // the reader hit the deadline, or the peer closed
 			return
+		case <-heartbeat.C:
+			_ = conn.SetWriteDeadline(time.Now().Add(wsWriteWait))
+			if err := conn.WriteMessage(websocket.TextMessage, makeHeartbeat(piPid, herdrBin)); err != nil {
+				bleLogf("WS: heartbeat write: %v\n", err)
+				return
+			}
+			// The device has no RTC; refresh its clock with every heartbeat.
+			if err := conn.WriteMessage(websocket.TextMessage, makeTimeSync(time.Now())); err != nil {
+				return
+			}
+		case <-ping.C:
+			if err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(wsWriteWait)); err != nil {
+				bleLogf("WS: ping: %v\n", err)
+				return
+			}
 		}
 	}
 }
-
-// portOf is a small helper (kept for clarity if listen is ever host:port).
-var _ = strconv.Itoa
-var _ = fmt.Sprintf
