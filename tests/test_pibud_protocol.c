@@ -15,7 +15,7 @@ int main(void)
     assert(pibud_protocol_parse(
                "{\"cmd\":\"hb\",\"model\":\"agnes-3.0-flash\",\"state\":\"running\","
                "\"tool\":\"edit\",\"arg\":\"main/x.c\",\"result_ok\":true,\"thinking\":true,"
-               "\"sub_total\":4,\"sub_working\":1,\"tokens\":18432,\"cost\":0.06,"
+               "\"sub_available\":true,\"sub_total\":4,\"sub_working\":1,\"tokens\":18432,\"cost\":0.06,"
                "\"stop_reason\":\"toolUse\",\"title\":\"pi - x\"}",
                &e) == PIBUD_PROTO_OK);
     assert(e.type == PIBUD_EVENT_HEARTBEAT);
@@ -26,16 +26,19 @@ int main(void)
     assert(strcmp(e.heartbeat.arg, "main/x.c") == 0);
     assert(e.heartbeat.result_ok && e.heartbeat.has_result);
     assert(e.heartbeat.thinking);
+    assert(e.heartbeat.sub_available);
     assert(e.heartbeat.sub_total == 4 && e.heartbeat.sub_working == 1);
     assert(e.heartbeat.tokens == 18432);
     assert(e.heartbeat.cost > 0.05 && e.heartbeat.cost < 0.07);
     assert(strcmp(e.heartbeat.stop_reason, "toolUse") == 0);
 
-    /* Heartbeat with no optional numbers (bounded input) */
+    /* Heartbeat with no optional numbers (bounded input). sub_available stays
+       false, so the UI shows the count as unknown rather than as zero. */
     memset(&e, 0, sizeof(e));
     assert(pibud_protocol_parse("{\"cmd\":\"hb\",\"state\":\"idle\"}", &e) ==
            PIBUD_PROTO_OK);
     assert(e.type == PIBUD_EVENT_HEARTBEAT);
+    assert(!e.heartbeat.sub_available);
     assert(e.heartbeat.sub_total == 0 && e.heartbeat.tokens == 0);
     assert(!e.heartbeat.has_result);
 

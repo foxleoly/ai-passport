@@ -23,6 +23,12 @@ static void pibud_copy_str(const cJSON *root, const char *key, char *dst, size_t
     }
 }
 
+static uint64_t pibud_json_u64(const cJSON *root, const char *key)
+{
+    const cJSON *item = cJSON_GetObjectItemCaseSensitive(root, key);
+    return cJSON_IsNumber(item) ? (uint64_t)item->valuedouble : 0;
+}
+
 static int pibud_parse_heartbeat(const cJSON *root, pibud_event_t *event)
 {
     pibud_heartbeat_t *hb = &event->heartbeat;
@@ -35,9 +41,12 @@ static int pibud_parse_heartbeat(const cJSON *root, pibud_event_t *event)
     pibud_copy_str(root, "arg", hb->arg, sizeof(hb->arg));
     pibud_copy_str(root, "stop_reason", hb->stop_reason, sizeof(hb->stop_reason));
     pibud_copy_str(root, "state", hb->state, sizeof(hb->state));
-    if (cJSON_IsNumber(cJSON_GetObjectItemCaseSensitive(root, "tokens"))) {
-        hb->tokens = (uint64_t)cJSON_GetObjectItemCaseSensitive(root, "tokens")->valuedouble;
-    }
+    hb->tokens = pibud_json_u64(root, "tokens");
+    hb->tokens_in = pibud_json_u64(root, "in_tokens");
+    hb->tokens_out = pibud_json_u64(root, "out_tokens");
+    hb->tokens_cache = pibud_json_u64(root, "cache_tokens");
+    hb->tokens_7d = pibud_json_u64(root, "tokens_7d");
+    hb->tokens_30d = pibud_json_u64(root, "tokens_30d");
     if (cJSON_IsNumber(cJSON_GetObjectItemCaseSensitive(root, "cost"))) {
         hb->cost = cJSON_GetObjectItemCaseSensitive(root, "cost")->valuedouble;
     }
@@ -46,6 +55,9 @@ static int pibud_parse_heartbeat(const cJSON *root, pibud_event_t *event)
         hb->sub_total = it ? (unsigned)it->valueint : 0;
         it = cJSON_GetObjectItemCaseSensitive(root, "sub_working");
         hb->sub_working = it ? (unsigned)it->valueint : 0;
+        /* Absent means the sidecar cannot know the count, so the zeroes above
+           must not be presented as a real reading. */
+        hb->sub_available = cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "sub_available"));
     }
     {
         const cJSON *rok = cJSON_GetObjectItemCaseSensitive(root, "result_ok");

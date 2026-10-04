@@ -7,6 +7,7 @@ idf_component_register(
          "pibud_i4.c"
          "pibud_line.c"
          "pibud_form.c"
+         "pibud_format.c"
          "pibud_prov_html.c"
          "pibud_token.c"
          "pibud_usbc.c"

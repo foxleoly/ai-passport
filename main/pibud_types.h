@@ -116,10 +116,6 @@ typedef enum {
 
 typedef enum {
     PIBUD_SETTING_BRIGHTNESS,
-    PIBUD_SETTING_SOUND,
-    PIBUD_SETTING_BLE,
-    PIBUD_SETTING_TRANSCRIPT,
-    PIBUD_SETTING_UNPAIR,
     PIBUD_SETTING_FACTORY_RESET,
     PIBUD_SETTING_COUNT,
 } pibud_setting_item_t;
@@ -134,9 +130,15 @@ typedef struct {
     bool result_ok;
     bool has_result;
     bool thinking;
+    bool sub_available; /* false when the sidecar cannot know the count */
     unsigned sub_total;
     unsigned sub_working;
     uint64_t tokens;
+    uint64_t tokens_in;    /* cumulative input */
+    uint64_t tokens_out;   /* cumulative output */
+    uint64_t tokens_cache; /* cumulative cache (read + write) */
+    uint64_t tokens_7d;    /* running total, last 7 local days */
+    uint64_t tokens_30d;   /* running total, last 30 local days */
     double cost;
     bool connected;
 } pibud_heartbeat_t;
@@ -150,11 +152,19 @@ typedef struct {
     bool text_truncated;
 } pibud_prompt_t;
 
+/* Brightness levels the MENU cycles. Level 0 is dimmest; the backlight percent
+ * is 20 + level*20. PIBUD_BRIGHTNESS_UNSET marks "not persisted yet", which
+ * pibud_state_init resolves to the default (full brightness). */
+#define PIBUD_BRIGHTNESS_STEPS  5
+#define PIBUD_BRIGHTNESS_UNSET  0xFF
+#define PIBUD_BRIGHTNESS_PERCENT(level) ((uint8_t)(20 + (int)(level) * 20))
+
 typedef struct {
     char name[PIBUD_NAME_MAX];
     char owner[PIBUD_OWNER_MAX];
     bool ble_enabled;
     uint64_t celebrated_level;
+    uint8_t brightness_level; /* persisted user preference */
 } pibud_settings_t;
 
 typedef struct {

@@ -8,7 +8,14 @@
 #define PIBUD_CELEBRATION_MS       1500
 #define PIBUD_TOKEN_CELEBRATION_STEP 50000
 #define PIBUD_SCROLL_STEP          24
-#define PIBUD_BRIGHTNESS_STEPS    5
+/* How long the "sent / not sent" confirmation stays on the action bar. */
+#define PIBUD_DELIVERY_FEEDBACK_MS 2500
+
+/* herdr reports this state while the agent is waiting for a human answer. It is
+ * mirrored into the prompt slot so the approval overlay appears and OK/DN can
+ * answer it; the id only has to be distinguishable from a real prompt id. */
+#define PIBUD_BLOCKED_STATE     "blocked"
+#define PIBUD_BLOCKED_PROMPT_ID "blocked"
 
 static void pibud_copy(char *dst, size_t dst_size, const char *src)
 {
@@ -105,6 +112,11 @@ static void pibud_clear_stale(pibud_state_t *state, uint64_t now_ms)
         state->heartbeat_stale = true;
         pibud_clear_session(state);
     }
+    /* The delivery confirmation is transient: drop it once it has been shown, so
+     * a failed send cannot pin the action bar on "not sent" forever. */
+    if (state->delivery != PIBUD_DELIVERY_NONE && now_ms >= state->delivery_until_ms) {
+        state->delivery = PIBUD_DELIVERY_NONE;
+    }
 }
 
 static void pibud_ui_refresh(pibud_action_t *action)
@@ -145,7 +157,7 @@ static bool pibud_prompt_attempted(const pibud_state_t *state, const pibud_promp
 }
 
 static void pibud_decide_act(pibud_state_t *state, pibud_act_kind_t kind,
-                             pibud_action_t *action)
+                             uint64_t now_ms, pibud_action_t *action)
 {
     if (kind == PIBUD_ACT_APPROVE || kind == PIBUD_ACT_DENY) {
         /* Approve/deny need a valid, actionable, un-attempted prompt. */
@@ -166,19 +178,26 @@ static void pibud_decide_act(pibud_state_t *state, pibud_act_kind_t kind,
     pibud_copy(state->last_attempted_id, sizeof(state->last_attempted_id), state->prompt.id);
     state->approval_locked = (kind != PIBUD_ACT_INTERRUPT);
     state->delivery = PIBUD_DELIVERY_SENDING;
+    state->delivery_until_ms = now_ms + PIBUD_DELIVERY_FEEDBACK_MS;
 }
 
 static void pibud_apply_act_result(pibud_state_t *state,
                                    const pibud_act_result_t *result, uint64_t now_ms,
                                    pibud_action_t *action)
 {
-    if (state->delivery != PIBUD_DELIVERY_SENDING ||
-        !pibud_matches_length(result->id, PIBUD_PROMPT_ID_MAX, result->id_length) ||
-        !pibud_matches_length(state->last_attempted_id, PIBUD_PROMPT_ID_MAX,
-                              result->id_length) ||
-        memcmp(state->last_attempted_id, result->id, result->id_length) != 0) {
+    // A global act (interrupt) carries no prompt id, so only correlate when the
+    // result actually names one; otherwise the confirmation would never arrive.
+    if (state->delivery != PIBUD_DELIVERY_SENDING) {
         return;
     }
+    if (result->id_length > 0 &&
+        (!pibud_matches_length(result->id, PIBUD_PROMPT_ID_MAX, result->id_length) ||
+         !pibud_matches_length(state->last_attempted_id, PIBUD_PROMPT_ID_MAX,
+                               result->id_length) ||
+         memcmp(state->last_attempted_id, result->id, result->id_length) != 0)) {
+        return;
+    }
+    state->delivery_until_ms = now_ms + PIBUD_DELIVERY_FEEDBACK_MS;
     if (result->success) {
         pibud_copy(state->last_sent_id, sizeof(state->last_sent_id), result->id);
         state->delivery = PIBUD_DELIVERY_SENT;
@@ -190,6 +209,41 @@ static void pibud_apply_act_result(pibud_state_t *state,
         state->delivery = PIBUD_DELIVERY_FAILED;
     }
     pibud_ui_refresh(action);
+}
+
+static void pibud_apply_prompt(pibud_state_t *state, const pibud_prompt_t *prompt,
+                               uint32_t generation, uint64_t now_ms,
+                               pibud_action_t *action);
+
+// herdr reports "blocked" while the agent waits for a human answer. Mirror that
+// into the prompt slot, which is what makes the approval overlay and the
+// OK=approve / DN=deny mapping reachable at all — otherwise nothing ever sends a
+// prompt and the whole approval path is dead code.
+static void pibud_sync_blocked_prompt(pibud_state_t *state, uint64_t now_ms,
+                                      pibud_action_t *action)
+{
+    if (strcmp(state->hb.state, PIBUD_BLOCKED_STATE) == 0) {
+        if (state->prompt.id[0] != '\0') {
+            return; /* already mirrored (or a real prompt arrived) */
+        }
+        pibud_prompt_t prompt;
+        memset(&prompt, 0, sizeof(prompt));
+        prompt.connected = true;
+        prompt.id_length = strlen(PIBUD_BLOCKED_PROMPT_ID);
+        memcpy(prompt.id, PIBUD_BLOCKED_PROMPT_ID, prompt.id_length + 1);
+        pibud_apply_prompt(state, &prompt, state->prompt_generation, now_ms, action);
+        return;
+    }
+
+    if (state->prompt.id[0] != '\0' &&
+        strcmp(state->prompt.id, PIBUD_BLOCKED_PROMPT_ID) == 0) {
+        /* The agent is no longer waiting: drop the mirrored prompt and forget the
+         * attempt, so the next blocked episode can be answered too. */
+        pibud_invalidate_prompt(state);
+        state->last_attempted_id[0] = '\0';
+        state->approval_locked = false;
+        pibud_ui_refresh(action);
+    }
 }
 
 static void pibud_apply_heartbeat(pibud_state_t *state, const pibud_heartbeat_t *hb,
@@ -215,6 +269,7 @@ static void pibud_apply_heartbeat(pibud_state_t *state, const pibud_heartbeat_t 
     }
 
     state->last_heartbeat_ms = now_ms;
+    pibud_sync_blocked_prompt(state, now_ms, action);
 
     if (level > state->settings.celebrated_level) {
         state->settings.celebrated_level = level;
@@ -259,30 +314,17 @@ static void pibud_apply_setting(pibud_state_t *state, pibud_action_t *action)
     case PIBUD_SETTING_BRIGHTNESS:
         state->brightness_level = (uint8_t)((state->brightness_level + 1U) %
                                              PIBUD_BRIGHTNESS_STEPS);
+        state->settings.brightness_level = state->brightness_level; /* persist */
         if (action != NULL) {
             action->type = PIBUD_ACTION_DISPLAY_BACKLIGHT;
             action->brightness_percent =
-                (uint8_t)(20U + state->brightness_level * 20U);
+                PIBUD_BRIGHTNESS_PERCENT(state->brightness_level);
         }
         break;
-    case PIBUD_SETTING_BLE:
-        state->settings.ble_enabled = !state->settings.ble_enabled;
-        if (action != NULL) {
-            action->type = PIBUD_ACTION_BLE_TOGGLE;
-            action->ble_enabled = state->settings.ble_enabled;
-        }
-        break;
-    case PIBUD_SETTING_UNPAIR:
-        pibud_open_confirmation(state, PIBUD_CONFIRM_UNPAIR, false, 0, action);
-        return;
     case PIBUD_SETTING_FACTORY_RESET:
         pibud_open_confirmation(state, PIBUD_CONFIRM_FACTORY_RESET, false, 0, action);
         return;
-    case PIBUD_SETTING_SOUND:
-    case PIBUD_SETTING_TRANSCRIPT:
     default:
-        pibud_copy(state->message, sizeof(state->message), "unavailable on this hardware");
-        pibud_ui_refresh(action);
         break;
     }
 }
@@ -299,6 +341,10 @@ void pibud_state_init(pibud_state_t *state, const pibud_settings_t *settings)
     state->brightness_level = 4;
     if (settings != NULL) {
         state->settings = *settings;
+        if (settings->brightness_level < PIBUD_BRIGHTNESS_STEPS) {
+            state->brightness_level = settings->brightness_level;
+        }
+        state->settings.brightness_level = state->brightness_level; /* canonical */
         pibud_copy(state->name, sizeof(state->name), settings->name);
         pibud_copy(state->owner, sizeof(state->owner), settings->owner);
     }
@@ -425,7 +471,7 @@ void pibud_state_reduce(pibud_state_t *state, const pibud_event_t *event,
             if (action != NULL) {
                 action->type = PIBUD_ACTION_DISPLAY_BACKLIGHT;
                 action->brightness_percent =
-                    (uint8_t)(20U + state->brightness_level * 20U);
+                    PIBUD_BRIGHTNESS_PERCENT(state->brightness_level);
             }
             break;
         }
@@ -454,9 +500,9 @@ void pibud_state_reduce(pibud_state_t *state, const pibud_event_t *event,
         }
         if (pibud_has_actionable_prompt(state)) {
             if (event->key == PIBUD_KEY_OK) {
-                pibud_decide_act(state, PIBUD_ACT_APPROVE, action);
+                pibud_decide_act(state, PIBUD_ACT_APPROVE, now_ms, action);
             } else if (event->key == PIBUD_KEY_DOWN) {
-                pibud_decide_act(state, PIBUD_ACT_DENY, action);
+                pibud_decide_act(state, PIBUD_ACT_DENY, now_ms, action);
             } else if (event->key == PIBUD_KEY_UP) {
                 if (action != NULL) {
                     action->type = PIBUD_ACTION_UI_SCROLL;
@@ -510,7 +556,7 @@ void pibud_state_reduce(pibud_state_t *state, const pibud_event_t *event,
             }
         } else if (event->key == PIBUD_KEY_OK &&
                    state->confirmation == PIBUD_CONFIRM_NONE) {
-            pibud_decide_act(state, PIBUD_ACT_INTERRUPT, action);
+            pibud_decide_act(state, PIBUD_ACT_INTERRUPT, now_ms, action);
         }
         break;
     case PIBUD_EVENT_TICK:

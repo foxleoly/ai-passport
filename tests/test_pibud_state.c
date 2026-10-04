@@ -25,6 +25,7 @@ int main(void)
     uint64_t now = 1000;
 
     memset(&settings, 0, sizeof(settings));
+    settings.brightness_level = PIBUD_BRIGHTNESS_UNSET;
     pibud_state_init(&s, &settings);
 
     /* init defaults */
@@ -32,6 +33,7 @@ int main(void)
     assert(s.connection == PIBUD_CONNECTION_OFFLINE);
     assert(s.character == PIBUD_CHAR_SLEEP);
     assert(s.heartbeat_stale);
+    assert(s.brightness_level == 4); /* full brightness by default */
 
     /* heartbeat connected+running -> BUSY, CONNECTED */
     e = ev(PIBUD_EVENT_HEARTBEAT, PIBUD_KEY_NONE);
@@ -68,6 +70,28 @@ int main(void)
     pibud_state_reduce(&s, &e, now + 30, &a);
     assert(a.type == PIBUD_ACTION_NONE || a.type == PIBUD_ACTION_UI_REFRESH);
 
+    /* herdr "blocked" mirrors into an approval prompt; unblocking clears it */
+    pibud_state_init(&s, &settings);
+    e = ev(PIBUD_EVENT_HEARTBEAT, PIBUD_KEY_NONE);
+    e.heartbeat.connected = true;
+    strcpy(e.heartbeat.state, "blocked");
+    pibud_state_reduce(&s, &e, now, &a);
+    pibud_state_snapshot(&s, &snap);
+    assert(snap.approval_visible);
+    e = ev(PIBUD_EVENT_KEY_CLICK, PIBUD_KEY_OK);
+    pibud_state_reduce(&s, &e, now + 10, &a);
+    assert(a.type == PIBUD_ACTION_ACT);
+    assert(a.act.kind == PIBUD_ACT_APPROVE);
+    assert(s.approval_locked);
+    /* The agent stops waiting -> the prompt is cleared and the attempt forgotten,
+     * so a later blocked episode can be answered too. */
+    e = ev(PIBUD_EVENT_HEARTBEAT, PIBUD_KEY_NONE);
+    e.heartbeat.connected = true;
+    strcpy(e.heartbeat.state, "idle");
+    pibud_state_reduce(&s, &e, now + 20, &a);
+    assert(s.prompt.id[0] == '\0');
+    assert(!s.approval_locked);
+
     /* interrupt: OK long with no actionable prompt -> ACT INTERRUPT */
     pibud_state_init(&s, &settings);
     e = ev(PIBUD_EVENT_KEY_LONG, PIBUD_KEY_OK);
@@ -100,13 +124,36 @@ int main(void)
     s.view = PIBUD_VIEW_MENU;
     e = ev(PIBUD_EVENT_KEY_CLICK, PIBUD_KEY_DOWN);
     pibud_state_reduce(&s, &e, now, &a);
-    assert(s.settings_sel == PIBUD_SETTING_SOUND);
+    assert(s.settings_sel == PIBUD_SETTING_FACTORY_RESET);
     e = ev(PIBUD_EVENT_KEY_CLICK, PIBUD_KEY_UP);
     pibud_state_reduce(&s, &e, now, &a);
     assert(s.settings_sel == PIBUD_SETTING_BRIGHTNESS);
     e = ev(PIBUD_EVENT_KEY_CLICK, PIBUD_KEY_OK);
     pibud_state_reduce(&s, &e, now, &a);
     assert(a.type == PIBUD_ACTION_DISPLAY_BACKLIGHT);
+
+    /* persisted brightness is honored; out-of-range falls back to default */
+    settings.brightness_level = 2;
+    pibud_state_init(&s, &settings);
+    assert(s.brightness_level == 2);
+    assert(s.settings.brightness_level == 2);
+    settings.brightness_level = PIBUD_BRIGHTNESS_STEPS; /* out of range */
+    pibud_state_init(&s, &settings);
+    assert(s.brightness_level == 4);
+    settings.brightness_level = PIBUD_BRIGHTNESS_UNSET; /* back to default */
+    pibud_state_init(&s, &settings);
+    assert(s.brightness_level == 4);
+
+    /* factory reset: MENU OK opens a confirmation, OK again confirms */
+    pibud_state_init(&s, &settings);
+    s.view = PIBUD_VIEW_MENU;
+    s.settings_sel = PIBUD_SETTING_FACTORY_RESET;
+    e = ev(PIBUD_EVENT_KEY_CLICK, PIBUD_KEY_OK);
+    pibud_state_reduce(&s, &e, now, &a);
+    assert(s.confirmation == PIBUD_CONFIRM_FACTORY_RESET);
+    e = ev(PIBUD_EVENT_KEY_CLICK, PIBUD_KEY_OK);
+    pibud_state_reduce(&s, &e, now + 5, &a);
+    assert(a.type == PIBUD_ACTION_FACTORY_RESET_CONFIRMED);
 
     /* unpair confirmation flow */
     pibud_state_init(&s, &settings);

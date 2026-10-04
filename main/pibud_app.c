@@ -33,6 +33,11 @@ static const char *TAG = "pibud_app";
 #define APP_QUEUE_DEPTH 16
 #define TICK_PERIOD_MS 200
 
+// Settings share the NVS namespace the Wi-Fi channel owns (pibud_ws.c), so the
+// user's configuration has one source of truth.
+#define PIBUD_NVS_NS         "pibud"
+#define PIBUD_NVS_BRIGHTNESS "brightness"
+
 static pibud_state_t s_state;
 static QueueHandle_t s_queue;
 static pibud_settings_t s_settings;
@@ -42,6 +47,21 @@ static uint64_t now_ms(void)
     return (uint64_t)(esp_timer_get_time() / 1000LL);
 }
 
+// Persist the brightness the MENU just applied. Brightness changes are rare and
+// NVS wear-levels, so writing on each change is fine.
+static void pibud_settings_save_brightness(uint8_t level)
+{
+    if (level >= PIBUD_BRIGHTNESS_STEPS) {
+        return;
+    }
+    nvs_handle_t h;
+    if (nvs_open(PIBUD_NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
+        (void)nvs_set_u8(h, PIBUD_NVS_BRIGHTNESS, level);
+        (void)nvs_commit(h);
+        nvs_close(h);
+    }
+}
+
 static void dispatch_action(const pibud_action_t *action)
 {
     pibud_ui_snapshot_t snap;
@@ -49,6 +69,7 @@ static void dispatch_action(const pibud_action_t *action)
     switch (action->type) {
     case PIBUD_ACTION_ACT:
         {
+            bool sent = false;
             char buf[256];
             int n = pibud_protocol_act_json(buf, sizeof(buf), action->act.kind,
                                             action->act.id, action->act.tool);
@@ -59,22 +80,52 @@ static void dispatch_action(const pibud_action_t *action)
                 if (pibud_usbc_is_open()) {
                     if (pibud_usbc_send(buf, (size_t)n + 1) != ESP_OK) {
                         ESP_LOGW(TAG, "usbc act send failed");
+                    } else {
+                        sent = true;
                     }
                 }
                 // And over the Wi-Fi WebSocket channel when it is connected.
                 if (pibud_ws_is_connected()) {
                     if (pibud_ws_send(buf, (size_t)n + 1) != ESP_OK) {
                         ESP_LOGW(TAG, "ws act send failed");
+                    } else {
+                        sent = true;
                     }
                 }
             }
+            // Report the outcome to the state machine; without this the device
+            // would sit on "sending" and the user could never tell whether the
+            // button press actually reached the computer.
+            pibud_event_t res;
+            memset(&res, 0, sizeof(res));
+            res.type = PIBUD_EVENT_ACT_RESULT;
+            res.act_result.kind = action->act.kind;
+            res.act_result.success = sent;
+            res.act_result.id_length = strnlen(action->act.id, PIBUD_PROMPT_ID_MAX);
+            memcpy(res.act_result.id, action->act.id, res.act_result.id_length);
+            (void)xQueueSend(s_queue, &res, 0);
             break;
         }
     case PIBUD_ACTION_DISPLAY_BACKLIGHT:
         bsp_display_backlight(action->brightness_percent);
+        pibud_settings_save_brightness(s_state.brightness_level);
         break;
     case PIBUD_ACTION_SCREEN_OFF:
         bsp_display_backlight(0);
+        break;
+    case PIBUD_ACTION_FACTORY_RESET_CONFIRMED:
+        // Wipe our NVS namespace (Wi-Fi credentials, link code, brightness) and
+        // reboot into the setup portal.
+        {
+            nvs_handle_t h;
+            if (nvs_open(PIBUD_NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
+                (void)nvs_erase_all(h);
+                (void)nvs_commit(h);
+                nvs_close(h);
+            }
+            ESP_LOGW(TAG, "factory reset: clearing settings and rebooting");
+            esp_restart();
+        }
         break;
     case PIBUD_ACTION_UI_REFRESH:
     case PIBUD_ACTION_SETTINGS:
@@ -148,7 +199,25 @@ void pibud_app_start(void)
     }
 
     memset(&s_settings, 0, sizeof(s_settings));
+    s_settings.brightness_level = PIBUD_BRIGHTNESS_UNSET; /* default = full brightness */
+
+    nvs_handle_t h;
+    if (nvs_open(PIBUD_NVS_NS, NVS_READONLY, &h) == ESP_OK) {
+        uint8_t level = 0;
+        if (nvs_get_u8(h, PIBUD_NVS_BRIGHTNESS, &level) == ESP_OK &&
+            level < PIBUD_BRIGHTNESS_STEPS) {
+            s_settings.brightness_level = level;
+        }
+        nvs_close(h);
+    }
+
     pibud_state_init(&s_state, &s_settings);
+
+    // app_main left the backlight at 100%; restore a persisted dimmer level now
+    // that the state has resolved it.
+    if (s_settings.brightness_level < PIBUD_BRIGHTNESS_STEPS) {
+        bsp_display_backlight(PIBUD_BRIGHTNESS_PERCENT(s_settings.brightness_level));
+    }
 
     s_queue = xQueueCreate(APP_QUEUE_DEPTH, sizeof(pibud_event_t));
     if (s_queue == NULL) {

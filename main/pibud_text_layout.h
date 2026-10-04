@@ -12,8 +12,7 @@
 #define PIBUD_UI_ACTION_H 22
 
 /* Context-sensitive action-bar hints (H- = long press). */
-#define PIBUD_ACTION_LIVE     "UP/DN:scroll  H-UP:view  H-OK:stop"
-#define PIBUD_ACTION_STATS    "UP/DN:scroll  H-UP:view  H-OK:stop"
+#define PIBUD_ACTION_LIVE     "H-UP:view  H-OK:stop"
 #define PIBUD_ACTION_MENU     "UP/DN:sel  OK:apply  H-UP:view"
 #define PIBUD_ACTION_CONFIRM  "OK:yes  DN:no"
 #define PIBUD_ACTION_APPROVAL "OK:allow  DN:deny  H-OK:stop"

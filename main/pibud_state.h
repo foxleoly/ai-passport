@@ -33,6 +33,7 @@ typedef struct {
     uint8_t brightness_level;
     bool screen_off;
     pibud_delivery_t delivery;
+    uint64_t delivery_until_ms;
     bool approval_locked;
     bool ble_connected;
     bool ble_encrypted;
