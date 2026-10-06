@@ -227,20 +227,21 @@ type Heartbeat struct {
 	StopReason   string  `json:"stop_reason,omitempty"`
 }
 
-// BuildHeartbeat composes a heartbeat from the published session state, the
-// JSONL events, and the sub-agent count — which is only known when herdr is
-// installed.
-func BuildHeartbeat(session *SessionState, ev Events, subs SubagentCount) Heartbeat {
+// BuildHeartbeat composes a heartbeat from the published sessions, the JSONL
+// events, and the sub-agent count — which is only known when herdr is installed.
+// The state is aggregated across sessions; cwd and title come from the session the
+// sidecar follows.
+func BuildHeartbeat(sessions Sessions, ev Events, subs SubagentCount) Heartbeat {
 	cwd, title := "", ""
-	if session != nil {
-		cwd = session.Cwd
-		title = session.Title
+	if sessions.Primary != nil {
+		cwd = sessions.Primary.Cwd
+		title = sessions.Primary.Title
 	}
 	hb := Heartbeat{
 		Cmd:          "hb",
 		Model:        ev.Model,
 		Provider:     ev.Provider,
-		State:        session.State(),
+		State:        sessions.State(),
 		Cwd:          cwd,
 		Title:        title,
 		Tool:         ev.LastTool,

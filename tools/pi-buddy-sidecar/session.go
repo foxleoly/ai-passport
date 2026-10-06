@@ -1,7 +1,7 @@
 // session.go — the state the pi extension publishes, replacing the herdr
 // snapshot the sidecar used to read. The extension writes one file per pi
 // process (session-<pid>.json), so several agents can run at once without
-// clobbering each other; the sidecar follows the most recently updated one.
+// clobbering each other.
 package main
 
 import (
@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"sync"
 	"time"
 )
 
@@ -72,26 +73,101 @@ func sessionCandidates(now time.Time) []SessionState {
 	return out
 }
 
-// loadSession picks the state the device should show: the pinned pi process
-// when one was requested, otherwise the most recently updated one. It returns
-// nil when no pi is publishing, which the device renders as offline.
-func loadSession(pin int) *SessionState {
-	candidates := sessionCandidates(time.Now())
+// Sessions is every fresh published state, plus the one the device shows details
+// for. Every pi rewrites its file once a second, so with several running "the
+// newest file" changes constantly: choosing that per heartbeat made the device
+// flip between sessions.
+type Sessions struct {
+	All     []SessionState
+	Primary *SessionState
+}
+
+// State is running when any pi is working, idle when at least one is up, and
+// offline when nobody publishes. Aggregating keeps the progress bar steady: the
+// question it answers is "is anything working", not "what did the last write say".
+func (s Sessions) State() string {
+	if len(s.All) == 0 {
+		return "offline"
+	}
+	for i := range s.All {
+		if !s.All[i].Idle {
+			return "running"
+		}
+	}
+	return "idle"
+}
+
+// primaryMu guards the sticky choice below; each transport builds heartbeats from
+// its own goroutine, and the one-shot path can race with them.
+var (
+	primaryMu  sync.Mutex
+	primaryPID int
+)
+
+// pickPrimary keeps following the session already chosen while it stays fresh, so
+// the device does not flicker between agents. It only moves on when that session
+// disappears, or when another one is working and the current one is not.
+func pickPrimary(all []SessionState, pin int) *SessionState {
 	if pin > 0 {
-		for i := range candidates {
-			if candidates[i].PID == pin {
-				return &candidates[i]
+		for i := range all {
+			if all[i].PID == pin {
+				return &all[i]
 			}
 		}
 		return nil
 	}
-	if len(candidates) == 0 {
+
+	primaryMu.Lock()
+	defer primaryMu.Unlock()
+
+	current := -1
+	for i := range all {
+		if all[i].PID == primaryPID {
+			current = i
+			break
+		}
+	}
+	anyRunning := false
+	for i := range all {
+		if !all[i].Idle {
+			anyRunning = true
+			break
+		}
+	}
+
+	// Keep the current one while it is still there and still worth showing: it is
+	// working, or nothing else is.
+	if current >= 0 && (!all[current].Idle || !anyRunning) {
+		return &all[current]
+	}
+	// Otherwise prefer a working session; All is already newest first.
+	for i := range all {
+		if !all[i].Idle {
+			primaryPID = all[i].PID
+			return &all[i]
+		}
+	}
+	if len(all) == 0 {
+		primaryPID = 0
 		return nil
 	}
-	return &candidates[0]
+	primaryPID = all[0].PID
+	return &all[0]
 }
 
-// State maps the published idle flag to the buddy state vocabulary. A nil
+// loadSessions reads every fresh published state and picks the one to show
+// details for. A nil Primary means nobody is publishing, i.e. pi is not running.
+func loadSessions(pin int) Sessions {
+	all := sessionCandidates(time.Now())
+	return Sessions{All: all, Primary: pickPrimary(all, pin)}
+}
+
+// loadSession is loadSessions for callers that only need the session shown.
+func loadSession(pin int) *SessionState {
+	return loadSessions(pin).Primary
+}
+
+// State maps one published idle flag to the buddy state vocabulary. A nil
 // session means nobody is publishing, i.e. pi is not running.
 func (s *SessionState) State() string {
 	if s == nil {

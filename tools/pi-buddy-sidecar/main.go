@@ -108,7 +108,7 @@ func main() {
 		return
 	}
 
-	session := loadSession(piPid)
+	sessions := loadSessions(piPid)
 
 	if act != "" {
 		fmt.Fprintf(os.Stderr, "act: %s\n", PreviewAct(act, approveText, denyText))
@@ -124,8 +124,8 @@ func main() {
 	}
 
 	path := sessionPath
-	if path == "" && session != nil {
-		path = session.SessionFile
+	if path == "" && sessions.Primary != nil {
+		path = sessions.Primary.SessionFile
 	}
 	if path == "" {
 		path = os.Getenv("PI_SESSION_FILE")
@@ -133,11 +133,12 @@ func main() {
 
 	ev := aggregateFileWindow(path, time.Time{}, time.Time{})
 	applyDailyUsage(&ev)
-	hb := BuildHeartbeat(session, ev, readSubagents(herdrBin))
+	hb := BuildHeartbeat(sessions, ev, readSubagents(herdrBin))
 
-	if session != nil {
-		fmt.Fprintf(os.Stderr, "session: pi pid %d (%s) cwd=%s jsonl=%s\n",
-			session.PID, session.State(), session.Cwd, session.SessionFile)
+	if sessions.Primary != nil {
+		fmt.Fprintf(os.Stderr, "session: pi pid %d, state %s, %d published, cwd=%s jsonl=%s\n",
+			sessions.Primary.PID, sessions.State(), len(sessions.All),
+			sessions.Primary.Cwd, sessions.Primary.SessionFile)
 	} else {
 		fmt.Fprintln(os.Stderr, "warn: no pi session published; is the pi-buddy extension installed?")
 	}

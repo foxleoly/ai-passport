@@ -13,14 +13,14 @@ import (
 	"time"
 )
 
-// makeHeartbeat builds one heartbeat JSON from the published session state and
-// the day's pi sessions. State comes from the published session; the
-// token/cost readouts are today's totals across every session.
+// makeHeartbeat builds one heartbeat JSON from the published sessions and the
+// day's pi sessions. The state is aggregated across sessions; the token/cost
+// readouts are today's totals across every session.
 func makeHeartbeat(piPid int, herdrBin string) []byte {
-	session := loadSession(piPid)
-	ev := aggregateFileWindow(sessionPathOf(session), time.Time{}, time.Time{})
+	sessions := loadSessions(piPid)
+	ev := aggregateFileWindow(sessionPathOf(sessions.Primary), time.Time{}, time.Time{})
 	applyDailyUsage(&ev)
-	hb := BuildHeartbeat(session, ev, readSubagents(herdrBin))
+	hb := BuildHeartbeat(sessions, ev, readSubagents(herdrBin))
 	return []byte(MustJSON(hb))
 }
 
